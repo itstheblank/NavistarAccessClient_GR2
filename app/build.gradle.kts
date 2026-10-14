@@ -51,4 +51,31 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+
+    // 1. CameraX (Xử lý luồng camera siêu nhẹ của Google)
+    val cameraxVersion = "1.4.0-alpha01"
+    implementation("androidx.camera:camera-core:$cameraxVersion")
+    implementation("androidx.camera:camera-camera2:$cameraxVersion")
+    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
+    implementation("androidx.camera:camera-view:$cameraxVersion")
+
+    // 2. Google ML Kit (Quét mặt real-time, vẽ khung viền, đo khoảng cách xa/gần)
+    implementation("com.google.mlkit:face-detection:16.1.6")
+
+    // 3. TensorFlow Lite (Chạy mô hình AI Face Verification 1:1 local)
+    // Lưu ý: tensorflow-lite-support kéo theo tensorflow-lite-support-api
+    // cùng namespace → phải exclude để tránh lỗi Manifest merger trên AGP 9.x
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4") {
+        exclude(group = "org.tensorflow", module = "tensorflow-lite-support-api")
+    }
+
+    // 4. Eclipse Paho MQTT (Chuẩn giao tiếp IoT cực nhẹ và ổn định)
+    implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")
+
+    // 5. Coroutines (Xử lý đa luồng bất đồng bộ để app không bị lag khi chạy AI)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // 6. ViewModel Compose (Cần cho hàm viewModel() trong Composable)
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
 }
