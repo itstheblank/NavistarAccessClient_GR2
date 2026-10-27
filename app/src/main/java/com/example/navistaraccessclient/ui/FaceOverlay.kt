@@ -9,6 +9,8 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
+import com.example.navistaraccessclient.model.AuthStatus
+import com.example.navistaraccessclient.model.FaceAuthResult
 import com.google.mlkit.vision.face.Face
 import kotlin.math.max
 
@@ -18,48 +20,66 @@ fun FaceOverlay(
     imageWidth: Int,
     imageHeight: Int,
     isFrontCamera: Boolean = true,
+    authResult: FaceAuthResult,
     modifier: Modifier = Modifier
 ) {
     Canvas(modifier = modifier.fillMaxSize()) {
-        if (imageWidth <= 0 || imageHeight <= 0) return@Canvas
+        val canvasWidth = size.width
+        val canvasHeight = size.height
 
-        // 1. Tính toán Scale dựa trên FILL_CENTER (giống logic của PreviewView)
-        val scaleFactor = max(
-            size.width / imageWidth.toFloat(),
-            size.height / imageHeight.toFloat()
+        // 1. Draw an OVAL GUIDING BOX in the center of the screen
+        val ovalHeight = canvasHeight * 0.65f
+        val ovalWidth = ovalHeight * 0.72f
+        val ovalLeft = (canvasWidth - ovalWidth) / 2f
+        val ovalTop = (canvasHeight - ovalHeight) / 2.5f
+
+        // Guide to frame color: Red (>= 2 sides present), Green (Valid), Blue (Detecting), Gray (Waiting)
+        val guideColor = when (authResult.status) {
+            AuthStatus.SUCCESS -> Color(0xFF00E676)
+            AuthStatus.FAILED -> Color(0xFFFF5252)
+            AuthStatus.DETECTED -> Color(0xFF448AFF)
+            AuthStatus.MULTIPLE_FACES -> Color(0xFFFF9100)
+            AuthStatus.IDLE -> Color.White.copy(alpha = 0.5f)
+        }
+
+        drawOval(
+            color = guideColor,
+            topLeft = Offset(ovalLeft, ovalTop),
+            size = Size(ovalWidth, ovalHeight),
+            style = Stroke(width = 3.dp.toPx())
         )
 
-        // 2. Tính phần bị crop (do FILL_CENTER sẽ cắt bớt ảnh thừa)
-        val scaledImageWidth = imageWidth * scaleFactor
-        val scaledImageHeight = imageHeight * scaleFactor
-        
-        val offsetX = (size.width - scaledImageWidth) / 2f
-        val offsetY = (size.height - scaledImageHeight) / 2f
+        if (imageWidth <= 0 || imageHeight <= 0 || faces.isEmpty()) return@Canvas
 
-        for (face in faces) {
-            val bounds = face.boundingBox
-            
-            // 3. Scale tọa độ và dịch chuyển theo offset
-            var left = bounds.left * scaleFactor + offsetX
-            val top = bounds.top * scaleFactor + offsetY
-            var right = bounds.right * scaleFactor + offsetX
-            val bottom = bounds.bottom * scaleFactor + offsetY
+        // 2. Algorithm for selecting a single face: Choose the face with the largest area
+        val primaryFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() } ?: return@Canvas
 
-            // 4. Mirror (Lật ngang) nếu dùng camera trước
-            if (isFrontCamera) {
-                val mirroredLeft = size.width - right
-                val mirroredRight = size.width - left
-                left = mirroredLeft
-                right = mirroredRight
-            }
+        // 3. Calculate scale based on FILL_CENTER
+        val scaleFactor = max(canvasWidth / imageWidth.toFloat(), canvasHeight / imageHeight.toFloat())
+        val scaledWidth = imageWidth * scaleFactor
+        val scaledHeight = imageHeight * scaleFactor
+        val offsetX = (canvasWidth - scaledWidth) / 2f
+        val offsetY = (canvasHeight - scaledHeight) / 2f
 
-            // Vẽ khung
-            drawRect(
-                color = Color.Green,
-                topLeft = Offset(left, top),
-                size = Size(right - left, bottom - top),
-                style = Stroke(width = 3.dp.toPx())
-            )
+        val bounds = primaryFace.boundingBox
+        var left = bounds.left * scaleFactor + offsetX
+        val top = bounds.top * scaleFactor + offsetY
+        var right = bounds.right * scaleFactor + offsetX
+        val bottom = bounds.bottom * scaleFactor + offsetY
+
+        if (isFrontCamera) {
+            val mirroredLeft = canvasWidth - right
+            val mirroredRight = canvasWidth - left
+            left = mirroredLeft
+            right = mirroredRight
         }
+
+        // Draw a border around the selected face
+        drawRect(
+            color = guideColor,
+            topLeft = Offset(left, top),
+            size = Size(right - left, bottom - top),
+            style = Stroke(width = 2.dp.toPx())
+        )
     }
 }

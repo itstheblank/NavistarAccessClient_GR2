@@ -19,7 +19,7 @@ import com.google.mlkit.vision.face.FaceDetectorOptions
  * @param onFacesDetected Callback trả về: danh sách Face, chiều rộng ảnh, chiều cao ảnh
  */
 class FaceAnalyzer(
-    private val onFacesDetected: (List<Face>, Int, Int) -> Unit
+    private val onFacesDetected: (List<Face>, Int, Int, ImageProxy) -> Unit
 ) : ImageAnalysis.Analyzer {
 
     companion object {
@@ -56,7 +56,7 @@ class FaceAnalyzer(
 
         detector.process(inputImage)
             .addOnSuccessListener { faces ->
-                onFacesDetected(faces, imageWidth, imageHeight)
+                onFacesDetected(faces, imageWidth, imageHeight, imageProxy)
             }
             .addOnFailureListener { e ->
                 Log.e(TAG, "Face detection failed", e)
