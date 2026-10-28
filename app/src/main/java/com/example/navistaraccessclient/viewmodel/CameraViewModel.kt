@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 class CameraViewModel(application: Application): AndroidViewModel(application) {
 
     private val recognizer: FaceRecognizer = TFLiteFaceRecognizer(application)
+
     var detectedFaces by mutableStateOf<List<Face>>(emptyList())
         private set
 
@@ -33,16 +34,27 @@ class CameraViewModel(application: Application): AndroidViewModel(application) {
     var latestFrameBitmap: Bitmap? = null
         private set
 
-    fun onFacesDetected(faces: List<Face>, width: Int, height: Int, imageProxy: ImageProxy){
+    // Cờ kiểm soát hiệu năng chống giật lag & ANR
+    private var isProcessing = false
+    private var lastInferenceTime = 0L
+    var isSettingsOpen by mutableStateOf(false)
+
+    fun onFacesDetected(faces: List<Face>, width: Int, height: Int, imageProxy: ImageProxy) {
+        // Cập nhật tọa độ vẽ khung nhanh trên UI
         detectedFaces = faces
         imageHeight = height
         imageWidth = width
 
-        // 1. Check the number of faces (Rule: If >= 2 faces are detected, either select only one or issue a warning)
+        // 1. Nếu đang mở hộp thoại Cài đặt để gõ tên -> DỪNG nhận diện để bàn phím không bị lag/ANR
+        if (isSettingsOpen) {
+            return
+        }
+
+        // 2. Kiểm tra số lượng khuôn mặt
         if (faces.size >= 2) {
             authResult = FaceAuthResult(
                 status = AuthStatus.MULTIPLE_FACES,
-                message = "Cảnh báo: Phát hiện ${faces.size} khuôn mặt! Vui lòng chỉ đứng 1 người."
+                message = "Cảnh báo: Có ${faces.size} người! Vui lòng chỉ đứng 1 người."
             )
             return
         }
@@ -52,43 +64,63 @@ class CameraViewModel(application: Application): AndroidViewModel(application) {
             return
         }
 
-        // 2. Convert and crop the face for recognition
+        // 3. THROTTLING: Chỉ chạy AI nếu không bận và cách lần trước ít nhất 500ms
+        val currentTime = System.currentTimeMillis()
+        if (isProcessing || (currentTime - lastInferenceTime < 500)) {
+            return
+        }
+
+        isProcessing = true
+        lastInferenceTime = currentTime
+
         val primaryFace = faces[0]
         val frameBitmap = BitmapUtils.imageProxyToBitmap(imageProxy)
-        latestFrameBitmap = frameBitmap
 
         if (frameBitmap != null) {
+            // Giải phóng frame cũ ngay lập tức tránh tràn RAM
+            if (latestFrameBitmap != null && latestFrameBitmap != frameBitmap) {
+                latestFrameBitmap?.recycle()
+            }
+            latestFrameBitmap = frameBitmap
+
             val faceBitmap = BitmapUtils.cropFace(frameBitmap, primaryFace.boundingBox)
             if (faceBitmap != null) {
                 viewModelScope.launch(Dispatchers.Default) {
-                    val result = recognizer.verify(faceBitmap)
-                    authResult = result
+                    try {
+                        val result = recognizer.verify(faceBitmap)
+                        authResult = result
+                    } finally {
+                        faceBitmap.recycle() // Thu hồi RAM lập tức
+                        isProcessing = false
+                    }
                 }
+            } else {
+                isProcessing = false
             }
+        } else {
+            isProcessing = false
         }
     }
 
-    /**
-     * Register the current face as a new user
-     */
     fun registerCurrentFace(name: String, onSuccess: () -> Unit) {
         val bitmap = latestFrameBitmap
         val face = detectedFaces.firstOrNull()
-        if (bitmap != null && face != null) {
+        if (bitmap != null && !bitmap.isRecycled && face != null) {
             val faceBitmap = BitmapUtils.cropFace(bitmap, face.boundingBox)
             if (faceBitmap != null) {
                 val userId = "USER_${System.currentTimeMillis() % 10000}"
                 recognizer.registerFace(userId, name, faceBitmap)
+                faceBitmap.recycle()
                 onSuccess()
             }
         }
     }
 
-    fun setThreshold(threshold: Float){
+    fun setThreshold(threshold: Float) {
         recognizer.setThreshold(threshold)
     }
 
-    fun getRegisteredUsers(): List<RegisteredUser>{
+    fun getRegisteredUsers(): List<RegisteredUser> {
         return recognizer.getRegisteredUsers()
     }
 }

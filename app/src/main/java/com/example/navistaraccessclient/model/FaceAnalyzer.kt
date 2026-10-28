@@ -9,16 +9,10 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import java.util.concurrent.ExecutorService
 
-/**
- * FaceAnalyzer - Nhận ImageProxy từ CameraX, đẩy cho ML Kit để phát hiện khuôn mặt.
- *
- * Lớp này implement ImageAnalysis.Analyzer - giao diện callback của CameraX.
- * Mỗi khi CameraX capture được 1 frame ảnh, hàm analyze() sẽ được gọi tự động.
- *
- * @param onFacesDetected Callback trả về: danh sách Face, chiều rộng ảnh, chiều cao ảnh
- */
 class FaceAnalyzer(
+    private val cameraExecutor: ExecutorService,
     private val onFacesDetected: (List<Face>, Int, Int, ImageProxy) -> Unit
 ) : ImageAnalysis.Analyzer {
 
@@ -54,14 +48,15 @@ class FaceAnalyzer(
         val imageWidth = if (isImageFlipped) mediaImage.height else mediaImage.width
         val imageHeight = if (isImageFlipped) mediaImage.width else mediaImage.height
 
+        // Chạy callback trên cameraExecutor để không làm nghẽn UI Thread
         detector.process(inputImage)
-            .addOnSuccessListener { faces ->
+            .addOnSuccessListener(cameraExecutor) { faces ->
                 onFacesDetected(faces, imageWidth, imageHeight, imageProxy)
             }
-            .addOnFailureListener { e ->
+            .addOnFailureListener(cameraExecutor) { e ->
                 Log.e(TAG, "Face detection failed", e)
             }
-            .addOnCompleteListener {
+            .addOnCompleteListener(cameraExecutor) {
                 imageProxy.close()
             }
     }

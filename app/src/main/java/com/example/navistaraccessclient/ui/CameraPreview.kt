@@ -70,7 +70,7 @@ fun CameraPreview(
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                     .also {
-                        it.setAnalyzer(cameraExecutor, FaceAnalyzer(onFacesDetected))
+                        it.setAnalyzer(cameraExecutor, FaceAnalyzer(cameraExecutor, onFacesDetected))
                     }
 
                 val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA

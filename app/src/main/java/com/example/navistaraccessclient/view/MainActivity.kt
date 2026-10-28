@@ -106,7 +106,10 @@ fun AccessControlScreen(
             )
 
             IconButton(
-                onClick = { showSettingsDialog = true },
+                onClick = {
+                    showSettingsDialog = true
+                    viewModel.isSettingsOpen = true
+                },
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
@@ -149,7 +152,10 @@ fun AccessControlScreen(
             if (showSettingsDialog) {
                 SettingsDialog(
                     viewModel = viewModel,
-                    onDismiss = { showSettingsDialog = false }
+                    onDismiss = {
+                        showSettingsDialog = false
+                        viewModel.isSettingsOpen = false
+                    }
                 )
             }
         }
