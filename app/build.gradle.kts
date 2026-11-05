@@ -32,7 +32,6 @@ android {
     }
     buildFeatures {
         compose = true
-        mlModelBinding = true
     }
 }
 
@@ -45,7 +44,8 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation("androidx.compose.material:material-icons-extended")
+    // Chỉ dùng icon Settings → bản core (bản extended chứa hàng nghìn icon, làm APK và RAM phình to)
+    implementation("androidx.compose.material:material-icons-core")
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
@@ -55,7 +55,7 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     // 1. CameraX (Xử lý luồng camera siêu nhẹ của Google)
-    val cameraxVersion = "1.4.0-alpha01"
+    val cameraxVersion = "1.4.2" // bản ổn định (thay cho 1.4.0-alpha01)
     implementation("androidx.camera:camera-core:$cameraxVersion")
     implementation("androidx.camera:camera-camera2:$cameraxVersion")
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
@@ -65,12 +65,8 @@ dependencies {
     implementation("com.google.mlkit:face-detection:16.1.6")
 
     // 3. TensorFlow Lite (Chạy mô hình AI Face Verification 1:1 local)
-    // Lưu ý: tensorflow-lite-support kéo theo tensorflow-lite-support-api
-    // cùng namespace → phải exclude để tránh lỗi Manifest merger trên AGP 9.x
+    // (Đã bỏ tensorflow-lite-support & mlModelBinding: code không dùng, chỉ làm build nặng hơn)
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4") {
-        exclude(group = "org.tensorflow", module = "tensorflow-lite-support-api")
-    }
 
     // 4. Eclipse Paho MQTT (Chuẩn giao tiếp IoT cực nhẹ và ổn định)
     implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")

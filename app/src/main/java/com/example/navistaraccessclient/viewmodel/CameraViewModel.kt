@@ -4,123 +4,220 @@ import android.app.Application
 import android.graphics.Bitmap
 import androidx.camera.core.ImageProxy
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.navistaraccessclient.model.*
 import com.example.navistaraccessclient.utils.BitmapUtils
+import com.example.navistaraccessclient.utils.OverlayGeometry
+import com.example.navistaraccessclient.utils.OverlayGeometry.Placement
 import com.google.mlkit.vision.face.Face
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 
-class CameraViewModel(application: Application): AndroidViewModel(application) {
+/** Gói dữ liệu 1 khung hình cho Overlay (1 state duy nhất → 1 lần invalidate) */
+data class FaceFrame(
+    val faces: List<Face> = emptyList(),
+    val imageWidth: Int = 0,
+    val imageHeight: Int = 0
+)
+
+/**
+ * QUY TẮC LUỒNG:
+ *  - onFacesDetected() chạy trên luồng camera.
+ *  - Mọi thay đổi State của Compose đều được đẩy về Main Thread.
+ *  - TFLite (verify / register) luôn chạy trên Dispatchers.Default, KHÔNG BAO GIỜ trên Main.
+ */
+class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
     private val recognizer: FaceRecognizer = TFLiteFaceRecognizer(application)
 
-    var detectedFaces by mutableStateOf<List<Face>>(emptyList())
+    // Chỉ Overlay đọc state này (trong pha draw) → không recompose cả màn hình mỗi frame
+    var faceFrame by mutableStateOf(FaceFrame())
         private set
 
-    var imageWidth by mutableIntStateOf(0)
-        private set
-
-    var imageHeight by mutableIntStateOf(0)
+    // Chỉ đổi khi chuyển trạng thái có mặt / không có mặt → Dialog không bị recompose mỗi frame
+    var hasFaceCandidate by mutableStateOf(false)
         private set
 
     var authResult by mutableStateOf(FaceAuthResult(AuthStatus.IDLE))
         private set
 
-    var latestFrameBitmap: Bitmap? = null
+    var isSettingsOpen by mutableStateOf(false)
         private set
 
-    // Cờ kiểm soát hiệu năng chống giật lag & ANR
-    private var isProcessing = false
-    private var lastInferenceTime = 0L
-    var isSettingsOpen by mutableStateOf(false)
+    var isRegistering by mutableStateOf(false)
+        private set
 
+    /** Bật trong Cài đặt để vẽ bounding box của ML Kit (phục vụ debug / chụp báo cáo) */
+    var showDebugBox by mutableStateOf(false)
+
+    // Kích thước vùng vẽ (px) → dùng để kiểm tra mặt có nằm trong Oval không
+    @Volatile private var canvasWidth = 0f
+    @Volatile private var canvasHeight = 0f
+    @Volatile private var faceWasValid = false
+
+    fun onCanvasSizeChanged(width: Int, height: Int) {
+        canvasWidth = width.toFloat()
+        canvasHeight = height.toFloat()
+    }
+
+    // Đọc từ luồng camera → cần @Volatile
+    @Volatile private var settingsOpenFlag = false
+    private val isProcessing = AtomicBoolean(false)
+    @Volatile private var lastInferenceTime = 0L
+
+    // Ảnh mặt 112x112 gần nhất (cùng frame với bounding box) để đăng ký
+    private val candidateLock = Any()
+    private var lastFaceCrop: Bitmap? = null
+
+    /** Gọi từ CameraPreview để tạm dừng ML Kit khi mở Cài đặt */
+    fun isAnalysisPaused(): Boolean = settingsOpenFlag
+
+    fun openSettings() {
+        settingsOpenFlag = true
+        isSettingsOpen = true
+    }
+
+    fun closeSettings() {
+        settingsOpenFlag = false
+        isSettingsOpen = false
+    }
+
+    private fun postToMain(block: () -> Unit) {
+        viewModelScope.launch(Dispatchers.Main.immediate) { block() }
+    }
+
+    private fun setStatus(status: AuthStatus, message: String) {
+        postToMain { authResult = FaceAuthResult(status, message = message) }
+    }
+
+    /** Chạy trên luồng camera (imageProxy còn hợp lệ trong hàm này) */
     fun onFacesDetected(faces: List<Face>, width: Int, height: Int, imageProxy: ImageProxy) {
-        // Cập nhật tọa độ vẽ khung nhanh trên UI
-        detectedFaces = faces
-        imageHeight = height
-        imageWidth = width
+        if (settingsOpenFlag) return
 
-        // 1. Nếu đang mở hộp thoại Cài đặt để gõ tên -> DỪNG nhận diện để bàn phím không bị lag/ANR
-        if (isSettingsOpen) {
-            return
-        }
-
-        // 2. Kiểm tra số lượng khuôn mặt
-        if (faces.size >= 2) {
-            authResult = FaceAuthResult(
-                status = AuthStatus.MULTIPLE_FACES,
-                message = "Cảnh báo: Có ${faces.size} người! Vui lòng chỉ đứng 1 người."
+        // 1. Kiểm tra vị trí khuôn mặt so với Oval (chỉ khi có đúng 1 mặt)
+        val placement: Placement? = if (faces.size == 1 && canvasWidth > 0f && canvasHeight > 0f) {
+            val faceRect = OverlayGeometry.mapToCanvas(
+                faces[0].boundingBox, width, height, canvasWidth, canvasHeight, mirror = true
             )
-            return
+            OverlayGeometry.checkPlacement(faceRect, OverlayGeometry.guideOval(canvasWidth, canvasHeight))
+        } else null
+        val isValid = placement == Placement.OK
+
+        postToMain {
+            faceFrame = FaceFrame(faces, width, height)
+            hasFaceCandidate = isValid // mutableStateOf bỏ qua nếu giá trị không đổi
         }
 
-        if (faces.isEmpty()) {
-            authResult = FaceAuthResult(AuthStatus.IDLE, message = "Vui lòng đưa mặt vào giữa khung Oval")
-            return
+        // 2. Phản hồi hướng dẫn cho người dùng
+        when {
+            faces.size >= 2 -> {
+                faceWasValid = false
+                setStatus(AuthStatus.MULTIPLE_FACES, "Cảnh báo: Có ${faces.size} người! Vui lòng chỉ đứng 1 người.")
+                return
+            }
+            faces.isEmpty() -> {
+                faceWasValid = false
+                setStatus(AuthStatus.IDLE, "Vui lòng đưa mặt vào giữa khung Oval")
+                return
+            }
+            placement == Placement.OFF_CENTER -> {
+                faceWasValid = false
+                setStatus(AuthStatus.IDLE, "Hãy đưa mặt vào giữa khung Oval")
+                return
+            }
+            placement == Placement.TOO_FAR -> {
+                faceWasValid = false
+                setStatus(AuthStatus.IDLE, "Hãy tiến lại gần hơn")
+                return
+            }
+            placement == Placement.TOO_CLOSE -> {
+                faceWasValid = false
+                setStatus(AuthStatus.IDLE, "Hãy lùi ra xa một chút")
+                return
+            }
         }
 
-        // 3. THROTTLING: Chỉ chạy AI nếu không bận và cách lần trước ít nhất 500ms
-        val currentTime = System.currentTimeMillis()
-        if (isProcessing || (currentTime - lastInferenceTime < 500)) {
-            return
+        // 3. Mặt vừa vào đúng vị trí → báo "Đang nhận diện" (Oval xanh dương)
+        if (!faceWasValid) {
+            faceWasValid = true
+            setStatus(AuthStatus.DETECTED, "Đang nhận diện...")
         }
 
-        isProcessing = true
-        lastInferenceTime = currentTime
+        // 4. THROTTLING: tối đa 1 lần suy luận / 500ms, không chồng lệnh
+        val now = System.currentTimeMillis()
+        if (now - lastInferenceTime < 500 || !isProcessing.compareAndSet(false, true)) return
+        lastInferenceTime = now
 
-        val primaryFace = faces[0]
         val frameBitmap = BitmapUtils.imageProxyToBitmap(imageProxy)
+        if (frameBitmap == null) {
+            isProcessing.set(false); return
+        }
+        val faceBitmap = BitmapUtils.cropFace(frameBitmap, faces[0].boundingBox)
+        frameBitmap.recycle() // ảnh full-frame không giữ lại nữa → tiết kiệm RAM
+        if (faceBitmap == null) {
+            isProcessing.set(false); return
+        }
 
-        if (frameBitmap != null) {
-            // Giải phóng frame cũ ngay lập tức tránh tràn RAM
-            if (latestFrameBitmap != null && latestFrameBitmap != frameBitmap) {
-                latestFrameBitmap?.recycle()
-            }
-            latestFrameBitmap = frameBitmap
+        // Lưu bản sao ảnh mặt (đã đúng vị trí trong Oval) cho chức năng đăng ký
+        synchronized(candidateLock) {
+            lastFaceCrop?.recycle()
+            lastFaceCrop = faceBitmap.copy(Bitmap.Config.ARGB_8888, false)
+        }
 
-            val faceBitmap = BitmapUtils.cropFace(frameBitmap, primaryFace.boundingBox)
-            if (faceBitmap != null) {
-                viewModelScope.launch(Dispatchers.Default) {
-                    try {
-                        val result = recognizer.verify(faceBitmap)
-                        authResult = result
-                    } finally {
-                        faceBitmap.recycle() // Thu hồi RAM lập tức
-                        isProcessing = false
-                    }
+        viewModelScope.launch(Dispatchers.Default) {
+            try {
+                val result = recognizer.verify(faceBitmap)
+                withContext(Dispatchers.Main) {
+                    // Bỏ kết quả nếu người dùng đã rời Oval hoặc đang mở Cài đặt
+                    if (!settingsOpenFlag && faceWasValid) authResult = result
                 }
-            } else {
-                isProcessing = false
-            }
-        } else {
-            isProcessing = false
-        }
-    }
-
-    fun registerCurrentFace(name: String, onSuccess: () -> Unit) {
-        val bitmap = latestFrameBitmap
-        val face = detectedFaces.firstOrNull()
-        if (bitmap != null && !bitmap.isRecycled && face != null) {
-            val faceBitmap = BitmapUtils.cropFace(bitmap, face.boundingBox)
-            if (faceBitmap != null) {
-                val userId = "USER_${System.currentTimeMillis() % 10000}"
-                recognizer.registerFace(userId, name, faceBitmap)
+            } finally {
                 faceBitmap.recycle()
-                onSuccess()
+                isProcessing.set(false)
             }
         }
     }
 
-    fun setThreshold(threshold: Float) {
-        recognizer.setThreshold(threshold)
+    /** Đăng ký khuôn mặt gần nhất. TFLite chạy nền → bàn phím/UI không bị đơ. */
+    fun registerCurrentFace(name: String, onDone: (Boolean) -> Unit) {
+        val crop = synchronized(candidateLock) {
+            lastFaceCrop?.takeIf { !it.isRecycled }?.copy(Bitmap.Config.ARGB_8888, false)
+        }
+        if (crop == null) {
+            onDone(false); return
+        }
+        isRegistering = true
+        viewModelScope.launch(Dispatchers.Default) {
+            val ok = try {
+                val userId = "USER_${System.currentTimeMillis() % 100000}"
+                recognizer.registerFace(userId, name, crop)
+            } catch (e: Exception) {
+                false
+            } finally {
+                crop.recycle()
+            }
+            withContext(Dispatchers.Main) {
+                isRegistering = false
+                onDone(ok)
+            }
+        }
     }
 
-    fun getRegisteredUsers(): List<RegisteredUser> {
-        return recognizer.getRegisteredUsers()
+    fun setThreshold(threshold: Float) = recognizer.setThreshold(threshold)
+
+    fun getRegisteredUsers(): List<RegisteredUser> = recognizer.getRegisteredUsers()
+
+    override fun onCleared() {
+        super.onCleared()
+        synchronized(candidateLock) {
+            lastFaceCrop?.recycle()
+            lastFaceCrop = null
+        }
+        recognizer.close()
     }
 }

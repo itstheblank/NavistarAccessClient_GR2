@@ -6,8 +6,9 @@ import android.graphics.Bitmap
  * Interface trừu tượng cho module Nhận diện khuôn mặt.
  * Sau này khi Lab cấp SDK riêng hoặc chuyển sang MediaPipe,
  * chỉ cần viết 1 class mới implement interface này mà không cần sửa code UI!
+ *
+ * Lưu ý: các hàm có thể tốn 50–300ms → KHÔNG gọi trên Main Thread.
  */
-
 interface FaceRecognizer {
     fun extractEmbedding(faceBitmap: Bitmap): FloatArray
 
@@ -18,4 +19,6 @@ interface FaceRecognizer {
     fun getRegisteredUsers(): List<RegisteredUser>
 
     fun setThreshold(threshold: Float)
+
+    fun close() {}
 }

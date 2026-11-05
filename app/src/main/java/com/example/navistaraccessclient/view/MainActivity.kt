@@ -11,6 +11,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -91,24 +93,25 @@ fun AccessControlScreen(
         Box(modifier = modifier.fillMaxSize()) {
             CameraPreview(
                 modifier = Modifier.fillMaxSize(),
+                isPaused = { viewModel.isAnalysisPaused() },
                 onFacesDetected = { faces, width, height, imageProxy ->
                     viewModel.onFacesDetected(faces, width, height, imageProxy)
                 }
             )
 
             FaceOverlay(
-                faces = viewModel.detectedFaces,
-                imageWidth = viewModel.imageWidth,
-                imageHeight = viewModel.imageHeight,
+                frameProvider = { viewModel.faceFrame },
+                statusProvider = { viewModel.authResult.status },
+                showDebugBoxProvider = { viewModel.showDebugBox },
+                onCanvasSizeChanged = { viewModel.onCanvasSizeChanged(it.width, it.height) },
                 isFrontCamera = true,
-                authResult = viewModel.authResult,
                 modifier = Modifier.fillMaxSize()
             )
 
             IconButton(
                 onClick = {
                     showSettingsDialog = true
-                    viewModel.isSettingsOpen = true
+                    viewModel.openSettings()
                 },
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -154,7 +157,7 @@ fun AccessControlScreen(
                     viewModel = viewModel,
                     onDismiss = {
                         showSettingsDialog = false
-                        viewModel.isSettingsOpen = false
+                        viewModel.closeSettings()
                     }
                 )
             }
@@ -188,9 +191,12 @@ fun SettingsDialog(
         onDismissRequest = onDismiss,
         title = { Text(text = "Cài Đặt Hệ Thống", fontWeight = FontWeight.Bold) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 Text(
-                    text = "Đăng ký khuôn mặt hiện tại:",
+                    text = "Đăng ký khuôn mặt hiện tại (mặt phải nằm trong khung Oval):",
                     fontWeight = FontWeight.SemiBold
                 )
                 OutlinedTextField(
@@ -202,19 +208,43 @@ fun SettingsDialog(
                 )
                 Button(
                     onClick = {
-                        if (newUserName.isNotBlank()) {
-                            viewModel.registerCurrentFace(newUserName.trim()) {
-                                Toast.makeText(context, "Đã đăng ký: $newUserName", Toast.LENGTH_SHORT).show()
-                                onDismiss()
+                        val name = newUserName.trim()
+                        if (name.isNotBlank()) {
+                            viewModel.registerCurrentFace(name) { ok ->
+                                if (ok) {
+                                    Toast.makeText(context, "Đã đăng ký: $name", Toast.LENGTH_SHORT).show()
+                                    onDismiss()
+                                } else {
+                                    Toast.makeText(context, "Chưa có ảnh khuôn mặt, hãy đứng trước camera rồi thử lại", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = newUserName.isNotBlank() && viewModel.detectedFaces.isNotEmpty()
+                    enabled = newUserName.isNotBlank() && viewModel.hasFaceCandidate && !viewModel.isRegistering
                 ) {
-                    Text("Lưu Khuôn Mặt Vào Bộ Nhớ")
+                    Text(if (viewModel.isRegistering) "Đang lưu..." else "Lưu Khuôn Mặt Vào Bộ Nhớ")
                 }
-                Divider(modifier = Modifier.padding(vertical = 4.dp))
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(text = "Hiển thị khung debug", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = "Vẽ khung phát hiện mặt của ML Kit (dùng khi kiểm thử)",
+                            color = Color.Gray,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = viewModel.showDebugBox,
+                        onCheckedChange = { viewModel.showDebugBox = it }
+                    )
+                }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
                 Text(
                     text = "Danh sách đã đăng ký (${registeredUsers.size}):",
                     fontWeight = FontWeight.SemiBold

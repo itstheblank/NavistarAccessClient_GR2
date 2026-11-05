@@ -8,78 +8,71 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.example.navistaraccessclient.model.AuthStatus
-import com.example.navistaraccessclient.model.FaceAuthResult
-import com.google.mlkit.vision.face.Face
-import kotlin.math.max
+import com.example.navistaraccessclient.utils.OverlayGeometry
+import com.example.navistaraccessclient.viewmodel.FaceFrame
 
+/**
+ * Lớp phủ giao diện:
+ *  - Oval hướng dẫn = tín hiệu chính cho người dùng (đổi màu theo trạng thái).
+ *  - Khung vuông bounding box CHỈ hiện khi bật "Hiển thị khung debug" trong Cài đặt.
+ *
+ * Các provider được đọc BÊN TRONG Canvas (pha draw) → mỗi frame chỉ vẽ lại Canvas,
+ * không recompose cả màn hình / Dialog.
+ */
 @Composable
 fun FaceOverlay(
-    faces: List<Face>,
-    imageWidth: Int,
-    imageHeight: Int,
+    frameProvider: () -> FaceFrame,
+    statusProvider: () -> AuthStatus,
+    showDebugBoxProvider: () -> Boolean,
+    onCanvasSizeChanged: (IntSize) -> Unit,
     isFrontCamera: Boolean = true,
-    authResult: FaceAuthResult,
     modifier: Modifier = Modifier
 ) {
-    Canvas(modifier = modifier.fillMaxSize()) {
-        val canvasWidth = size.width
-        val canvasHeight = size.height
+    Canvas(
+        modifier = modifier
+            .fillMaxSize()
+            .onSizeChanged(onCanvasSizeChanged)
+    ) {
+        val status = statusProvider()
+        val oval = OverlayGeometry.guideOval(size.width, size.height)
 
-        // 1. Draw an OVAL GUIDING BOX in the center of the screen
-        val ovalHeight = canvasHeight * 0.65f
-        val ovalWidth = ovalHeight * 0.72f
-        val ovalLeft = (canvasWidth - ovalWidth) / 2f
-        val ovalTop = (canvasHeight - ovalHeight) / 2.5f
-
-        // Guide to frame color: Red (>= 2 sides present), Green (Valid), Blue (Detecting), Gray (Waiting)
-        val guideColor = when (authResult.status) {
+        val guideColor = when (status) {
             AuthStatus.SUCCESS -> Color(0xFF00E676)
             AuthStatus.FAILED -> Color(0xFFFF5252)
             AuthStatus.DETECTED -> Color(0xFF448AFF)
             AuthStatus.MULTIPLE_FACES -> Color(0xFFFF9100)
-            AuthStatus.IDLE -> Color.White.copy(alpha = 0.5f)
+            AuthStatus.IDLE -> Color.White.copy(alpha = 0.6f)
         }
+        // Oval dày hơn khi có kết quả để người dùng dễ nhận ra
+        val strokeWidth = if (status == AuthStatus.IDLE) 3.dp.toPx() else 5.dp.toPx()
 
         drawOval(
             color = guideColor,
-            topLeft = Offset(ovalLeft, ovalTop),
-            size = Size(ovalWidth, ovalHeight),
-            style = Stroke(width = 3.dp.toPx())
+            topLeft = Offset(oval.left, oval.top),
+            size = Size(oval.width, oval.height),
+            style = Stroke(width = strokeWidth)
         )
 
-        if (imageWidth <= 0 || imageHeight <= 0 || faces.isEmpty()) return@Canvas
+        if (!showDebugBoxProvider()) return@Canvas
 
-        // 2. Algorithm for selecting a single face: Choose the face with the largest area
-        val primaryFace = faces.maxByOrNull { it.boundingBox.width() * it.boundingBox.height() } ?: return@Canvas
-
-        // 3. Calculate scale based on FILL_CENTER
-        val scaleFactor = max(canvasWidth / imageWidth.toFloat(), canvasHeight / imageHeight.toFloat())
-        val scaledWidth = imageWidth * scaleFactor
-        val scaledHeight = imageHeight * scaleFactor
-        val offsetX = (canvasWidth - scaledWidth) / 2f
-        val offsetY = (canvasHeight - scaledHeight) / 2f
-
-        val bounds = primaryFace.boundingBox
-        var left = bounds.left * scaleFactor + offsetX
-        val top = bounds.top * scaleFactor + offsetY
-        var right = bounds.right * scaleFactor + offsetX
-        val bottom = bounds.bottom * scaleFactor + offsetY
-
-        if (isFrontCamera) {
-            val mirroredLeft = canvasWidth - right
-            val mirroredRight = canvasWidth - left
-            left = mirroredLeft
-            right = mirroredRight
+        // ---- Chế độ debug: vẽ bounding box của ML Kit ----
+        val frame = frameProvider()
+        if (frame.imageWidth <= 0 || frame.imageHeight <= 0 || frame.faces.isEmpty()) return@Canvas
+        for (face in frame.faces) {
+            val r = OverlayGeometry.mapToCanvas(
+                face.boundingBox, frame.imageWidth, frame.imageHeight,
+                size.width, size.height, isFrontCamera
+            )
+            drawRect(
+                color = Color.Yellow.copy(alpha = 0.8f),
+                topLeft = Offset(r.left, r.top),
+                size = Size(r.width(), r.height()),
+                style = Stroke(width = 1.5.dp.toPx())
+            )
         }
-
-        // Draw a border around the selected face
-        drawRect(
-            color = guideColor,
-            topLeft = Offset(left, top),
-            size = Size(right - left, bottom - top),
-            style = Stroke(width = 2.dp.toPx())
-        )
     }
 }

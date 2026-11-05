@@ -2,77 +2,88 @@ package com.example.navistaraccessclient.model
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.SystemClock
+import android.util.Log
 import org.tensorflow.lite.Interpreter
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.sqrt
 
 class TFLiteFaceRecognizer(
     private val context: Context,
     private val modelFileName: String = "mobilefacenet.tflite"
-) : FaceRecognizer{
+) : FaceRecognizer {
+
+    companion object {
+        private const val TAG = "TFLiteFaceRecognizer"
+    }
 
     private var interpreter: Interpreter? = null
-    private var threshold: Float = 0.70f
+    @Volatile private var threshold: Float = 0.70f
 
-    private val registeredUsers = mutableMapOf<String, RegisteredUser>()
+    // Có thể được đọc/ghi từ nhiều luồng (nhận diện nền + đăng ký)
+    private val registeredUsers = ConcurrentHashMap<String, RegisteredUser>()
 
     private val inputSize = 112
     private val embeddingDim = 192
 
+    // Tái sử dụng bộ đệm → không cấp phát ~150KB mỗi lần suy luận
+    private val inputBuffer: ByteBuffer =
+        ByteBuffer.allocateDirect(inputSize * inputSize * 3 * 4).order(ByteOrder.nativeOrder())
+    private val pixels = IntArray(inputSize * inputSize)
+    private val lock = Any()
+
     init {
         try {
-            val assetFileDescriptor = context.assets.openFd(modelFileName)
-            val fileInputStream = FileInputStream(assetFileDescriptor.fileDescriptor)
-            val fileChannel = fileInputStream.channel
-            val startOffset = assetFileDescriptor.startOffset
-            val declaredLength = assetFileDescriptor.declaredLength
-            val modelBuffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
-            interpreter = Interpreter(modelBuffer)
-        } catch (e: Exception){
-            android.util.Log.w("TFLiteFaceRecognizer", "Chưa tìm thấy model $modelFileName trong assets, dùng chế độ Mocking.")
+            context.assets.openFd(modelFileName).use { afd ->
+                FileInputStream(afd.fileDescriptor).use { fis ->
+                    val modelBuffer = fis.channel.map(
+                        FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength
+                    )
+                    val options = Interpreter.Options().setNumThreads(2)
+                    interpreter = Interpreter(modelBuffer, options)
+                }
+            }
+            Log.i(TAG, "Đã nạp model $modelFileName")
+        } catch (t: Throwable) {
+            // Throwable: bắt cả UnsatisfiedLinkError (lỗi thư viện native)
+            Log.e(TAG, "Không nạp được model $modelFileName → chế độ Mocking", t)
         }
     }
 
-    override fun setThreshold(threshold: Float){
+    override fun setThreshold(threshold: Float) {
         this.threshold = threshold
     }
 
-    override fun getRegisteredUsers(): List<RegisteredUser> {
-        return registeredUsers.values.toList()
-    }
+    override fun getRegisteredUsers(): List<RegisteredUser> = registeredUsers.values.toList()
 
     override fun extractEmbedding(faceBitmap: Bitmap): FloatArray {
-        val output = Array(1) { FloatArray(embeddingDim) }
-        val interpreterInstance = interpreter
+        // Interpreter KHÔNG thread-safe → khóa lại
+        synchronized(lock) {
+            val interpreterInstance = interpreter ?: return FloatArray(embeddingDim) { 0.1f }
+            val scaled = if (faceBitmap.width == inputSize && faceBitmap.height == inputSize) faceBitmap
+            else Bitmap.createScaledBitmap(faceBitmap, inputSize, inputSize, true)
+            scaled.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
+            if (scaled !== faceBitmap) scaled.recycle()
 
-        if (interpreterInstance == null) {
-            return FloatArray(embeddingDim) { 0.1f}
+            inputBuffer.rewind()
+            for (pixel in pixels) {
+                inputBuffer.putFloat((((pixel shr 16) and 0xFF) - 127.5f) / 128.0f)
+                inputBuffer.putFloat((((pixel shr 8) and 0xFF) - 127.5f) / 128.0f)
+                inputBuffer.putFloat(((pixel and 0xFF) - 127.5f) / 128.0f)
+            }
+            inputBuffer.rewind()
+
+            val output = Array(1) { FloatArray(embeddingDim) }
+            interpreterInstance.run(inputBuffer, output)
+            return output[0]
         }
-
-        val byteBuffer = ByteBuffer.allocateDirect(1 * inputSize * inputSize * 3 * 4).apply{
-            order(ByteOrder.nativeOrder())
-        }
-        val pixels = IntArray(inputSize * inputSize)
-        val scaledBitmap = Bitmap.createScaledBitmap(faceBitmap, inputSize, inputSize, true)
-        scaledBitmap.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
-
-        for(pixel in pixels){
-            val r = ((pixel shr 16) and 0xFF)
-            val g = ((pixel shr 8) and 0xFF)
-            val b = (pixel and 0xFF)
-            byteBuffer.putFloat((r - 127.5f) / 128.0f)
-            byteBuffer.putFloat((g - 127.5f) / 128.0f)
-            byteBuffer.putFloat((b - 127.5f) / 128.0f)
-        }
-
-        interpreterInstance.run(byteBuffer, output)
-        return output[0]
     }
 
-    override fun verify(faceBitmap: Bitmap): FaceAuthResult{
+    override fun verify(faceBitmap: Bitmap): FaceAuthResult {
         if (registeredUsers.isEmpty()) {
             return FaceAuthResult(
                 status = AuthStatus.FAILED,
@@ -80,11 +91,11 @@ class TFLiteFaceRecognizer(
             )
         }
 
+        val start = SystemClock.elapsedRealtime()
         val currentEmbedding = extractEmbedding(faceBitmap)
         var bestMatch: RegisteredUser? = null
         var maxSimilarity = -1f
 
-        // Find the person with the highest Cosine Similarity
         for (user in registeredUsers.values) {
             val sim = calculateCosineSimilarity(currentEmbedding, user.embedding)
             if (sim > maxSimilarity) {
@@ -92,6 +103,8 @@ class TFLiteFaceRecognizer(
                 bestMatch = user
             }
         }
+        // Dùng cho tiêu chí nghiệm thu "độ trễ suy luận ≤ 100ms" (lọc Logcat theo tag này)
+        Log.d(TAG, "verify() = ${SystemClock.elapsedRealtime() - start} ms, sim=$maxSimilarity")
 
         return if (maxSimilarity >= threshold && bestMatch != null) {
             FaceAuthResult(
@@ -116,9 +129,13 @@ class TFLiteFaceRecognizer(
         return true
     }
 
-    /**
-     * Calculates the cosine similarity between two face vectors
-     */
+    override fun close() {
+        synchronized(lock) {
+            interpreter?.close()
+            interpreter = null
+        }
+    }
+
     private fun calculateCosineSimilarity(v1: FloatArray, v2: FloatArray): Float {
         var dot = 0f
         var norm1 = 0f
