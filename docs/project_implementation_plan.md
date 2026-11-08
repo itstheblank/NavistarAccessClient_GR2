@@ -103,7 +103,13 @@ graph LR
      * Giảm RAM: bỏ `material-icons-extended`, `tensorflow-lite-support`, `mlModelBinding`; tái sử dụng buffer TFLite; recycle Bitmap trung gian.
      * Oval có hiệu lực thật: chỉ nhận diện khi mặt nằm giữa Oval và đủ gần (`utils/OverlayGeometry.kt`), hướng dẫn "tiến lại gần / lùi ra xa", trạng thái `DETECTED` ("Đang nhận diện...").
      * Bounding box ML Kit chỉ hiện khi bật "Hiển thị khung debug" trong Cài đặt.
-  * **Hạn chế còn lại:** chưa lưu người dùng đăng ký xuống bộ nhớ trong (mất khi tắt app); chưa có chống giả mạo bằng ảnh (liveness).
+  8. **Lưu trữ & quản lý người dùng (07/11/2026):**
+     * Lưu người dùng đã đăng ký xuống bộ nhớ trong (`data/FaceStore.kt` → `registered_faces.json`, ghi bằng `AtomicFile`); chỉ lưu tên + vector 192 chiều, không lưu ảnh. Tắt/mở app vẫn còn.
+     * Mã người dùng sinh theo UUID (`USER_` + 8 ký tự) thay cho `millis % 100000` (có thể trùng).
+     * Thêm nút xoá từng người trong Dialog Cài đặt; danh sách tự cập nhật.
+     * Loại file khuôn mặt khỏi Auto Backup (`backup_rules.xml`, `data_extraction_rules.xml`).
+     * Cập nhật tài liệu: gộp báo cáo thành `docs/reports/report_phase_0_2.md`, sửa `system_architecture.md` và `activity_diagram.md` cho khớp code.
+  * **Hạn chế còn lại:** chưa có chống giả mạo bằng ảnh (liveness); mỗi người chỉ lưu 1 vector mẫu.
 
 ---
 
@@ -179,5 +185,6 @@ graph LR
 | **Tốc độ Nhận diện** | Độ trễ suy luận AI $\le 100\text{ms}$ | Logcat tag `TFLiteFaceRecognizer` đo hàm `verify()` | ✅ Đạt: 17–28ms (TB ~20ms) trên giả lập |
 | **Độ chính xác** | Phân biệt người quen và người lạ chính xác | Thử nghiệm với người đã đăng ký và người chưa đăng ký | ✅ Đạt: người đã đăng ký sim 0.94–0.96 (ngưỡng 0.70); người lạ bị từ chối; ≥ 2 người cảnh báo đúng |
 | **Trải nghiệm UI** | Khung Oval nằm ngang chuẩn tỉ lệ, không đơ/ANR | Test nhập tên bàn phím ảo trên giả lập + webcam | ✅ Đạt: hết ANR khi gõ tên; camera 640x480 (Preview = Analysis) |
+| **Lưu người dùng** | Người đã đăng ký còn nguyên sau khi tắt/mở app | Đăng ký → force-stop → mở lại → nhận diện | ⏳ Cần chạy lại kiểm thử sau bản sửa 07/11 |
 | **Kết nối IoT** | Publish thành công bản tin JSON khi có người vào | MQTT Explorer kiểm tra topic trên Broker | ⏳ Chờ GĐ 3 |
 | **Độ ổn định Kiosk** | Chạy bền bỉ liên tục không bị dừng đột ngột | Cắm máy chạy thử nghiệm qua đêm | ⏳ Chờ GĐ 4 |

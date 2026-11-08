@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.navistaraccessclient.data.FaceStore
 import com.example.navistaraccessclient.model.*
 import com.example.navistaraccessclient.utils.BitmapUtils
 import com.example.navistaraccessclient.utils.OverlayGeometry
@@ -16,6 +17,7 @@ import com.google.mlkit.vision.face.Face
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Gói dữ liệu 1 khung hình cho Overlay (1 state duy nhất → 1 lần invalidate) */
@@ -33,7 +35,8 @@ data class FaceFrame(
  */
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val recognizer: FaceRecognizer = TFLiteFaceRecognizer(application)
+    // Người dùng đã đăng ký được lưu xuống file (FaceStore) → mở lại app vẫn còn
+    private val recognizer = TFLiteFaceRecognizer(application, store = FaceStore(application))
 
     // Chỉ Overlay đọc state này (trong pha draw) → không recompose cả màn hình mỗi frame
     var faceFrame by mutableStateOf(FaceFrame())
@@ -55,6 +58,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     /** Bật trong Cài đặt để vẽ bounding box của ML Kit (phục vụ debug / chụp báo cáo) */
     var showDebugBox by mutableStateOf(false)
 
+    /** Danh sách người đã đăng ký — là State để đăng ký/xoá xong Dialog tự cập nhật */
+    var registeredUsers by mutableStateOf<List<RegisteredUser>>(emptyList())
+        private set
+
     // Kích thước vùng vẽ (px) → dùng để kiểm tra mặt có nằm trong Oval không
     @Volatile private var canvasWidth = 0f
     @Volatile private var canvasHeight = 0f
@@ -73,6 +80,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     // Ảnh mặt 112x112 gần nhất (cùng frame với bounding box) để đăng ký
     private val candidateLock = Any()
     private var lastFaceCrop: Bitmap? = null
+
+    init {
+        // Nạp người dùng đã lưu từ bộ nhớ trong (đọc file → luồng IO, không chặn Main)
+        viewModelScope.launch(Dispatchers.IO) {
+            recognizer.loadFromStore()
+            val users = recognizer.getRegisteredUsers()
+            withContext(Dispatchers.Main) { registeredUsers = users }
+        }
+    }
 
     /** Gọi từ CameraPreview để tạm dừng ML Kit khi mở Cài đặt */
     fun isAnalysisPaused(): Boolean = settingsOpenFlag
@@ -194,23 +210,33 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         isRegistering = true
         viewModelScope.launch(Dispatchers.Default) {
             val ok = try {
-                val userId = "USER_${System.currentTimeMillis() % 100000}"
-                recognizer.registerFace(userId, name, crop)
+                // UUID → không bị trùng (bản cũ dùng millis % 100000 có thể lặp lại)
+                val userId = "USER_" + UUID.randomUUID().toString().take(8).uppercase()
+                recognizer.registerFace(userId, name, crop) // có ghi file → đang ở luồng nền
             } catch (e: Exception) {
                 false
             } finally {
                 crop.recycle()
             }
+            val users = recognizer.getRegisteredUsers()
             withContext(Dispatchers.Main) {
                 isRegistering = false
+                registeredUsers = users
                 onDone(ok)
             }
         }
     }
 
-    fun setThreshold(threshold: Float) = recognizer.setThreshold(threshold)
+    /** Xoá 1 người đã đăng ký (ghi file → luồng IO) */
+    fun removeUser(id: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            recognizer.removeFace(id)
+            val users = recognizer.getRegisteredUsers()
+            withContext(Dispatchers.Main) { registeredUsers = users }
+        }
+    }
 
-    fun getRegisteredUsers(): List<RegisteredUser> = recognizer.getRegisteredUsers()
+    fun setThreshold(threshold: Float) = recognizer.setThreshold(threshold)
 
     override fun onCleared() {
         super.onCleared()

@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
+import com.example.navistaraccessclient.data.FaceStore
 import org.tensorflow.lite.Interpreter
 import java.io.FileInputStream
 import java.nio.ByteBuffer
@@ -12,9 +13,17 @@ import java.nio.channels.FileChannel
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.sqrt
 
+/**
+ * Bản sửa lỗi GĐ 2 (07/11/2026):
+ *  - Nhận thêm [store] (có thể null) → người dùng đã đăng ký được lưu xuống file, mở lại app vẫn còn.
+ *  - [loadFromStore] nạp danh sách khi khởi động (gọi trên luồng nền).
+ *  - [removeFace] xoá người dùng.
+ *  Phần TFLite / Cosine giữ nguyên.
+ */
 class TFLiteFaceRecognizer(
     private val context: Context,
-    private val modelFileName: String = "mobilefacenet.tflite"
+    private val modelFileName: String = "mobilefacenet.tflite",
+    private val store: FaceStore? = null
 ) : FaceRecognizer {
 
     companion object {
@@ -54,11 +63,27 @@ class TFLiteFaceRecognizer(
         }
     }
 
+    /** Nạp người dùng đã lưu. Gọi 1 lần lúc khởi động, trên Dispatchers.IO. */
+    fun loadFromStore(): Int {
+        val users = store?.loadAll() ?: return 0
+        users.forEach { u ->
+            if (u.embedding.size == embeddingDim) registeredUsers[u.id] = u
+            else Log.w(TAG, "Bỏ qua ${u.id}: vector ${u.embedding.size} chiều ≠ $embeddingDim (đổi model?)")
+        }
+        Log.i(TAG, "Đã nạp ${registeredUsers.size} người dùng từ bộ nhớ")
+        return registeredUsers.size
+    }
+
+    private fun persist() {
+        store?.saveAll(registeredUsers.values)
+    }
+
     override fun setThreshold(threshold: Float) {
         this.threshold = threshold
     }
 
-    override fun getRegisteredUsers(): List<RegisteredUser> = registeredUsers.values.toList()
+    override fun getRegisteredUsers(): List<RegisteredUser> =
+        registeredUsers.values.sortedBy { it.name }
 
     override fun extractEmbedding(faceBitmap: Bitmap): FloatArray {
         // Interpreter KHÔNG thread-safe → khóa lại
@@ -126,7 +151,14 @@ class TFLiteFaceRecognizer(
     override fun registerFace(id: String, name: String, faceBitmap: Bitmap): Boolean {
         val embedding = extractEmbedding(faceBitmap)
         registeredUsers[id] = RegisteredUser(id, name, embedding)
+        persist()
         return true
+    }
+
+    override fun removeFace(id: String): Boolean {
+        val removed = registeredUsers.remove(id) != null
+        if (removed) persist()
+        return removed
     }
 
     override fun close() {

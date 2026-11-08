@@ -1,51 +1,53 @@
 # 🔄 Activity Diagram - Luồng Xử lý Frame Camera
-**Mục tiêu:** Mô tả vòng lặp xử lý frame ảnh, nhấn mạnh bước giải phóng bộ nhớ (`imageProxy.close()`)
+**Mục tiêu:** Mô tả vòng lặp xử lý 1 frame ảnh từ CameraX → ML Kit → TFLite, nhấn mạnh bước giải phóng bộ nhớ (`imageProxy.close()`).
+**Cập nhật:** 07/11/2026 — khớp với mã nguồn sau GĐ 2 (`FaceAnalyzer.kt`, `CameraViewModel.kt`).
 
 ---
 
 ## Lưu đồ Thuật toán
 
 ```mermaid
-stateDiagram-v2
-    [*] --> RequestPermission: App khởi động
+flowchart TD
+    START([App khởi động]) --> PERM{Quyền CAMERA?}
+    PERM -- Từ chối --> DENY([Hiện thông báo xin quyền])
+    PERM -- Được cấp --> BIND[Bind Preview + ImageAnalysis<br/>640x480, KEEP_ONLY_LATEST]
+    BIND --> WAIT[Chờ frame]
 
-    RequestPermission --> PermissionDenied: Người dùng từ chối
-    RequestPermission --> BindCamera: Quyền CAMERA được cấp
-    PermissionDenied --> [*]: Hiện thông báo lỗi
-
-    BindCamera --> WaitForFrame: CameraX bind thành công
-
-    state "🔄 Vòng lặp xử lý Frame (Main Loop)" as FrameLoop {
-        WaitForFrame --> ReceiveProxy: ImageAnalysis callback
-
-        ReceiveProxy --> CheckNull: Kiểm tra imageProxy.image
-
-        CheckNull --> SkipFrame: image == null
-        CheckNull --> CreateInputImage: image != null
-
-        CreateInputImage --> MLKitProcess: InputImage.fromMediaImage()
-
-        state "🔍 ML Kit Face Detection" as MLKit {
-            MLKitProcess --> NoFace: faces.isEmpty()
-            MLKitProcess --> FaceFound: faces.isNotEmpty()
-        }
-
-        NoFace --> ClearOverlay: Xóa khung vẽ cũ
-        FaceFound --> DrawBoundingBox: Vẽ khung xanh quanh mặt
-        DrawBoundingBox --> FuturePhase: Giai đoạn 2 - TFLite Verify
+    subgraph CAMTHREAD["Luồng camera – FaceAnalyzer + CameraViewModel.onFacesDetected"]
+        WAIT --> SKIP{image null?<br/>Đang mở Cài đặt?<br/>Chưa đủ 66ms?}
+        SKIP -- Có --> CLOSE
+        SKIP -- Không --> MLK[ML Kit detector.process]
+        MLK --> COUNT{Số khuôn mặt}
+        COUNT -- 0 --> S_IDLE[IDLE: Đưa mặt vào Oval]
+        COUNT -- "≥ 2" --> S_MULTI[MULTIPLE_FACES: Chỉ đứng 1 người]
+        COUNT -- 1 --> PLACE{Vị trí so với Oval}
+        PLACE -- "Lệch / xa / gần" --> S_GUIDE[IDLE: Vào giữa / Tiến lại gần / Lùi ra xa]
+        PLACE -- Đúng --> S_DET[DETECTED: Đang nhận diện...]
+        S_DET --> THR{"Đã qua 500ms<br/>và không có suy luận đang chạy?"}
+        THR -- Chưa --> CLOSE
+        THR -- Rồi --> CROP[toBitmap + xoay + crop 15%<br/>→ 112x112, recycle frame gốc]
+        S_IDLE --> CLOSE
+        S_MULTI --> CLOSE
+        S_GUIDE --> CLOSE
+        CROP --> CLOSE
+        CLOSE[["⚠️ imageProxy.close()<br/>(trong finally)"]]
     end
 
-    SkipFrame --> ForceClose
-    ClearOverlay --> ForceClose
-    FuturePhase --> ForceClose
+    CLOSE --> WAIT
 
-    state "⚠️ CRITICAL: Giải phóng Bộ nhớ" as ForceClose {
-        [*] --> CallClose: imageProxy.close()
-        CallClose --> [*]: Buffer được giải phóng
-    }
+    subgraph BG["Dispatchers.Default (song song với luồng camera)"]
+        CROP -. "launch" .-> VERIFY[TFLite MobileFaceNet<br/>vector 192 chiều]
+        VERIFY --> COS{"Cosine lớn nhất ≥ 0.70?"}
+        COS -- Có --> OK[SUCCESS]
+        COS -- Không --> FAIL[FAILED]
+    end
 
-    ForceClose --> WaitForFrame: Chờ frame tiếp theo
+    OK --> UI[Main Thread: cập nhật Oval + thông báo<br/>bỏ kết quả nếu mặt đã rời Oval]
+    FAIL --> UI
+    UI -. "GĐ 3" .-> MQTT[(Đóng gói AccessLog → MQTT)]
 ```
+
+**Đọc sơ đồ:** nhánh suy luận TFLite chạy **song song** trên luồng nền với vòng lặp camera. Frame đã được crop thành Bitmap riêng nên `imageProxy` được đóng ngay, CameraX gửi frame tiếp mà không phải chờ TFLite.
 
 ## Giải thích Chi tiết
 
@@ -60,14 +62,30 @@ stateDiagram-v2
 
 ### Nguyên tắc vàng
 > `imageProxy.close()` phải được gọi trong **MỌI nhánh** của luồng xử lý:
-> thành công, thất bại, exception, không tìm thấy mặt, image == null.
+> thành công, thất bại, exception, không tìm thấy mặt, image == null, frame bị bỏ qua.
 >
-> Cách an toàn nhất: Đặt trong `addOnCompleteListener` (gọi cả khi success lẫn failure).
+> Trong code: frame bị bỏ qua → `close()` ngay đầu `analyze()`; còn lại → `close()` trong khối
+> `finally` của `addOnCompleteListener`, **sau khi** `onFacesDetected()` đã chuyển ảnh sang Bitmap.
 
-### Cấu hình tối ưu RAM cho ImageAnalysis
-```
+### Ba tầng giới hạn tải CPU
+
+| Tầng | Vị trí | Giới hạn |
+|---|---|---|
+| CameraX | `STRATEGY_KEEP_ONLY_LATEST` | Bỏ frame cũ nếu xử lý chưa kịp |
+| ML Kit | `FaceAnalyzer.minIntervalMs = 66` | ≤ ~15 lần/giây; tạm dừng khi mở Cài đặt |
+| TFLite | `CameraViewModel` (500ms + `AtomicBoolean`) | ≤ 2 lần/giây, không chạy chồng |
+
+### Cấu hình CameraX thực tế (`CameraPreview.kt`)
+```kotlin
+val resolutionSelector = ResolutionSelector.Builder()
+    .setAspectRatioStrategy(AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY)
+    .setResolutionStrategy(ResolutionStrategy(Size(640, 480),
+        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
+    .build()
+
 ImageAnalysis.Builder()
-    .setBackpressureStrategy(STRATEGY_KEEP_ONLY_LATEST)  // Drop frame cũ nếu xử lý chưa kịp
-    .setTargetResolution(Size(480, 640))                  // Giảm resolution → giảm RAM
+    .setResolutionSelector(resolutionSelector)                       // cùng selector với Preview
+    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST) // drop frame cũ
     .build()
 ```
+(`setTargetResolution()` đã bị CameraX 1.3+ đánh dấu deprecated nên không dùng.)

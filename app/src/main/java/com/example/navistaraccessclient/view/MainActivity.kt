@@ -16,6 +16,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -177,7 +178,7 @@ fun AccessControlScreen(
 }
 
 /**
- * Hộp thoại Cài đặt: Cho phép Đăng ký khuôn mặt mới và xem danh sách
+ * Hộp thoại Cài đặt: Đăng ký khuôn mặt mới, xem và xoá người đã đăng ký
  */
 @Composable
 fun SettingsDialog(
@@ -186,7 +187,7 @@ fun SettingsDialog(
 ) {
     var newUserName by remember { mutableStateOf("") }
     val context = LocalContext.current
-    val registeredUsers = remember { viewModel.getRegisteredUsers() }
+    val registeredUsers = viewModel.registeredUsers
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(text = "Cài Đặt Hệ Thống", fontWeight = FontWeight.Bold) },
@@ -253,7 +254,23 @@ fun SettingsDialog(
                     Text(text = "Chưa có dữ liệu người dùng.", color = Color.Gray, fontSize = 14.sp)
                 } else {
                     registeredUsers.forEach { user ->
-                        Text(text = "• ${user.name} (${user.id})", fontSize = 14.sp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "• ${user.name} (${user.id})",
+                                fontSize = 14.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                            IconButton(onClick = { viewModel.removeUser(user.id) }) {
+                                Icon(
+                                    imageVector = Icons.Default.Delete,
+                                    contentDescription = "Xoá ${user.name}",
+                                    tint = Color.Gray
+                                )
+                            }
+                        }
                     }
                 }
             }
