@@ -47,6 +47,7 @@ dependencies {
     // Chỉ dùng icon Settings → bản core (bản extended chứa hàng nghìn icon, làm APK và RAM phình to)
     implementation("androidx.compose.material:material-icons-core")
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303") // org.json thật cho unit test (bản của Android chỉ là stub)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -68,8 +69,9 @@ dependencies {
     // (Đã bỏ tensorflow-lite-support & mlModelBinding: code không dùng, chỉ làm build nặng hơn)
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
 
-    // 4. Eclipse Paho MQTT (Chuẩn giao tiếp IoT cực nhẹ và ổn định)
-    implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")
+    // 4. Eclipse Paho MQTT v5 (theo tài liệu Lab: EMQX, MQTT 5.0, clean start = false + session expiry)
+    //    Đã bỏ bản mqttv3 — không dùng song song 2 thư viện.
+    implementation("org.eclipse.paho:org.eclipse.paho.mqttv5.client:1.2.5")
 
     // 5. Coroutines (Xử lý đa luồng bất đồng bộ để app không bị lag khi chạy AI)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
