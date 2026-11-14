@@ -9,6 +9,11 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.navistaraccessclient.data.FaceStore
+import com.example.navistaraccessclient.iot.ConnState
+import com.example.navistaraccessclient.iot.DeviceAgent
+import com.example.navistaraccessclient.iot.DeviceConfig
+import com.example.navistaraccessclient.iot.DeviceState
+import com.example.navistaraccessclient.iot.protocol.DoorStatus
 import com.example.navistaraccessclient.model.*
 import com.example.navistaraccessclient.utils.BitmapUtils
 import com.example.navistaraccessclient.utils.OverlayGeometry
@@ -32,11 +37,30 @@ data class FaceFrame(
  *  - onFacesDetected() chạy trên luồng camera.
  *  - Mọi thay đổi State của Compose đều được đẩy về Main Thread.
  *  - TFLite (verify / register) luôn chạy trên Dispatchers.Default, KHÔNG BAO GIỜ trên Main.
+ *  - [GĐ3] Toàn bộ việc MQTT nằm trong DeviceAgent (luồng riêng). ViewModel chỉ đọc trạng thái
+ *    và báo kết quả nhận diện qua AccessEventGate → DeviceAgent.reportAccess().
  */
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
     // Người dùng đã đăng ký được lưu xuống file (FaceStore) → mở lại app vẫn còn
     private val recognizer = TFLiteFaceRecognizer(application, store = FaceStore(application))
+
+    // ---------------- [GĐ3] IoT / MQTT ----------------
+    private val deviceAgent = DeviceAgent(application, viewModelScope)
+    /** Mỗi lượt người đứng trước cửa → đúng 1 bản tin access (không spam 2 lần/giây) */
+    private val eventGate = AccessEventGate()
+
+    var connState by mutableStateOf<ConnState>(ConnState.Disabled)
+        private set
+    var deviceConfig by mutableStateOf(deviceAgent.config.value)
+        private set
+    var deviceState by mutableStateOf(DeviceState())
+        private set
+    var doorStatus by mutableStateOf(DoorStatus.CLOSE)
+        private set
+    /** Sự kiện IoT gần nhất (hiện khi bật chế độ debug) */
+    var lastIotEvent by mutableStateOf<String?>(null)
+        private set
 
     // Chỉ Overlay đọc state này (trong pha draw) → không recompose cả màn hình mỗi frame
     var faceFrame by mutableStateOf(FaceFrame())
@@ -88,6 +112,21 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             val users = recognizer.getRegisteredUsers()
             withContext(Dispatchers.Main) { registeredUsers = users }
         }
+
+        // [GĐ3] Đồng bộ StateFlow của DeviceAgent sang Compose State (collect chạy trên Main)
+        viewModelScope.launch { deviceAgent.connState.collect { connState = it } }
+        viewModelScope.launch { deviceAgent.config.collect { deviceConfig = it } }
+        viewModelScope.launch { deviceAgent.door.state.collect { doorStatus = it } }
+        viewModelScope.launch { deviceAgent.lastEvent.collect { lastIotEvent = it } }
+        viewModelScope.launch {
+            deviceAgent.state.collect { s ->
+                deviceState = s
+                // Chỉ áp ngưỡng của server khi người dùng bật (chưa rõ thang đo của Lab)
+                val t = s.serverThreshold
+                if (deviceAgent.config.value.applyServerThreshold && t != null) recognizer.setThreshold(t.toFloat())
+            }
+        }
+        deviceAgent.start()
     }
 
     /** Gọi từ CameraPreview để tạm dừng ML Kit khi mở Cài đặt */
@@ -101,6 +140,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun closeSettings() {
         settingsOpenFlag = false
         isSettingsOpen = false
+        eventGate.resetStreak()
     }
 
     private fun postToMain(block: () -> Unit) {
@@ -109,6 +149,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun setStatus(status: AuthStatus, message: String) {
         postToMain { authResult = FaceAuthResult(status, message = message) }
+    }
+
+    /** Mặt rời Oval → lượt sau phải xác nhận lại từ đầu (AccessEventGate) */
+    private fun markFaceInvalid() {
+        if (faceWasValid) {
+            faceWasValid = false
+            postToMain { eventGate.resetStreak() }
+        }
     }
 
     /** Chạy trên luồng camera (imageProxy còn hợp lệ trong hàm này) */
@@ -132,27 +180,27 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         // 2. Phản hồi hướng dẫn cho người dùng
         when {
             faces.size >= 2 -> {
-                faceWasValid = false
+                markFaceInvalid()
                 setStatus(AuthStatus.MULTIPLE_FACES, "Cảnh báo: Có ${faces.size} người! Vui lòng chỉ đứng 1 người.")
                 return
             }
             faces.isEmpty() -> {
-                faceWasValid = false
+                markFaceInvalid()
                 setStatus(AuthStatus.IDLE, "Vui lòng đưa mặt vào giữa khung Oval")
                 return
             }
             placement == Placement.OFF_CENTER -> {
-                faceWasValid = false
+                markFaceInvalid()
                 setStatus(AuthStatus.IDLE, "Hãy đưa mặt vào giữa khung Oval")
                 return
             }
             placement == Placement.TOO_FAR -> {
-                faceWasValid = false
+                markFaceInvalid()
                 setStatus(AuthStatus.IDLE, "Hãy tiến lại gần hơn")
                 return
             }
             placement == Placement.TOO_CLOSE -> {
-                faceWasValid = false
+                markFaceInvalid()
                 setStatus(AuthStatus.IDLE, "Hãy lùi ra xa một chút")
                 return
             }
@@ -190,7 +238,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 val result = recognizer.verify(faceBitmap)
                 withContext(Dispatchers.Main) {
                     // Bỏ kết quả nếu người dùng đã rời Oval hoặc đang mở Cài đặt
-                    if (!settingsOpenFlag && faceWasValid) authResult = result
+                    if (!settingsOpenFlag && faceWasValid) {
+                        // [GĐ3] Thiết bị bị server khoá (DISABLE_DEVICE) → không chào mừng
+                        authResult = if (deviceState.isDeviceDisable && result.status == AuthStatus.SUCCESS)
+                            result.copy(status = AuthStatus.FAILED, message = "Thiết bị đang bị vô hiệu hoá")
+                        else result
+                        eventGate.submit(result)?.let { reportAccess(it) }
+                    }
                 }
             } finally {
                 faceBitmap.recycle()
@@ -198,6 +252,22 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
     }
+
+    /** [GĐ3] Gửi 1 lượt ra vào (Main). Nếu bị từ chối vì lý do khác "người lạ" thì hiện lý do. */
+    private fun reportAccess(result: FaceAuthResult) {
+        viewModelScope.launch {
+            val decision = deviceAgent.reportAccess(result)
+            if (!decision.granted && decision.message != null && faceWasValid) {
+                authResult = result.copy(status = AuthStatus.FAILED, message = decision.message)
+            }
+        }
+    }
+
+    // ---------------- [GĐ3] Cấu hình thiết bị ----------------
+
+    fun saveDeviceConfig(config: DeviceConfig) = deviceAgent.updateConfig(config)
+
+    fun generateMac(): String = deviceAgent.regenerateMac()
 
     /** Đăng ký khuôn mặt gần nhất. TFLite chạy nền → bàn phím/UI không bị đơ. */
     fun registerCurrentFace(name: String, onDone: (Boolean) -> Unit) {
@@ -240,6 +310,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
+        deviceAgent.shutdown()
         synchronized(candidateLock) {
             lastFaceCrop?.recycle()
             lastFaceCrop = null

@@ -109,6 +109,34 @@ fun AccessControlScreen(
                 modifier = Modifier.fillMaxSize()
             )
 
+            // [GĐ3] Trạng thái kết nối server + cửa (góc trên trái)
+            IotStatusChip(
+                conn = viewModel.connState,
+                door = viewModel.doorStatus,
+                state = viewModel.deviceState,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .statusBarsPadding()
+                    .padding(16.dp)
+            )
+
+            // [GĐ3] Sự kiện IoT gần nhất — chỉ hiện khi bật khung debug (màn hình kiosk vẫn gọn)
+            if (viewModel.showDebugBox) {
+                viewModel.lastIotEvent?.let { ev ->
+                    Text(
+                        text = ev,
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .statusBarsPadding()
+                            .padding(top = 64.dp, start = 16.dp, end = 16.dp)
+                            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
             IconButton(
                 onClick = {
                     showSettingsDialog = true
@@ -235,7 +263,7 @@ fun SettingsDialog(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(text = "Hiển thị khung debug", fontWeight = FontWeight.SemiBold)
                         Text(
-                            text = "Vẽ khung phát hiện mặt của ML Kit (dùng khi kiểm thử)",
+                            text = "Vẽ khung ML Kit + hiện sự kiện MQTT gần nhất (dùng khi kiểm thử)",
                             color = Color.Gray,
                             fontSize = 12.sp
                         )
@@ -273,6 +301,9 @@ fun SettingsDialog(
                         }
                     }
                 }
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                // [GĐ3] Cấu hình kết nối hệ thống Lab
+                DeviceSettingsSection(viewModel = viewModel)
             }
         },
         confirmButton = {
