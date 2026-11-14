@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  [GĐ3] targetSdk 37 CHẶN HTTP thường (cleartext) theo mặc định.
+  Chỉ mở cho đúng các host cần thiết, KHÔNG mở cho toàn bộ app:
+    - 10.0.2.2  : laptop chạy giả lập (tools/mock_lab_server.py)
+    - localhost : dự phòng
+  Khi có địa chỉ ApiGateway thật của Lab:
+    - Nếu Lab dùng HTTPS → không cần thêm gì.
+    - Nếu Lab dùng HTTP  → thêm 1 dòng <domain> với IP/tên miền của Lab.
+  (MQTT qua TCP 1883 KHÔNG bị chính sách này ảnh hưởng — chỉ áp dụng cho HTTP.)
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <domain includeSubdomains="false">localhost</domain>
+        <!-- <domain includeSubdomains="false">192.168.1.100</domain>  ← IP ApiGateway của Lab -->
+    </domain-config>
+</network-security-config>
