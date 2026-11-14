@@ -229,8 +229,8 @@ class MqttV5Connection(
         if (e is MqttException) {
             return when (e.reasonCode) {
                 134, 135 -> "Sai username/token hoặc không có quyền (${e.reasonCode})"
-                MqttException.REASON_CODE_SERVER_CONNECT_ERROR.toInt() -> "Không tới được broker (sai IP/port, firewall?)"
-                MqttException.REASON_CODE_CLIENT_TIMEOUT.toInt() -> "Hết thời gian chờ broker"
+                32103 -> "Không tới được broker (sai IP/port, firewall?)" // Paho: SERVER_CONNECT_ERROR
+                32000 -> "Hết thời gian chờ broker"                       // Paho: CLIENT_TIMEOUT
                 else -> "Lỗi MQTT ${e.reasonCode}: ${e.cause?.message ?: e.message}"
             }
         }
