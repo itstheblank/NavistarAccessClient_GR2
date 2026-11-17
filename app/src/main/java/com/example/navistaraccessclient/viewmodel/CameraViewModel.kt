@@ -14,6 +14,8 @@ import com.example.navistaraccessclient.iot.DeviceAgent
 import com.example.navistaraccessclient.iot.DeviceConfig
 import com.example.navistaraccessclient.iot.DeviceState
 import com.example.navistaraccessclient.iot.protocol.DoorStatus
+import com.example.navistaraccessclient.iot.protocol.AccessSchedule
+import com.example.navistaraccessclient.iot.protocol.PushBiometric
 import com.example.navistaraccessclient.model.*
 import com.example.navistaraccessclient.utils.BitmapUtils
 import com.example.navistaraccessclient.utils.OverlayGeometry
@@ -44,6 +46,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     // Người dùng đã đăng ký được lưu xuống file (FaceStore) → mở lại app vẫn còn
     private val recognizer = TFLiteFaceRecognizer(application, store = FaceStore(application))
+
+    /** Lấy vector khuôn mặt từ FaceImg của server */
+    private val enroller = FaceImageEnroller(recognizer)
 
     // ---------------- [GĐ3] IoT / MQTT ----------------
     private val deviceAgent = DeviceAgent(application, viewModelScope)
@@ -126,6 +131,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 if (deviceAgent.config.value.applyServerThreshold && t != null) recognizer.setThreshold(t.toFloat())
             }
         }
+        deviceAgent.biometricHandler = { bio -> applyBiometric(bio) }
         deviceAgent.start()
     }
 
@@ -253,14 +259,68 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    /** [GĐ3] Gửi 1 lượt ra vào (Main). Nếu bị từ chối vì lý do khác "người lạ" thì hiện lý do. */
+    /** [GĐ3] Gửi 1 lượt ra vào (Main). Người từ server → kèm BioId/IdNumber thật + kiểm tra LstTimes. */
     private fun reportAccess(result: FaceAuthResult) {
+        val user = result.userId?.let { id -> registeredUsers.firstOrNull { it.id == id } }
         viewModelScope.launch {
-            val decision = deviceAgent.reportAccess(result)
+            val decision = deviceAgent.reportAccess(
+                result,
+                bioId = user?.bioId,
+                idNumber = user?.idNumber,
+                schedule = user?.let { scheduleOf(it) }
+            )
             if (!decision.granted && decision.message != null && faceWasValid) {
                 authResult = result.copy(status = AuthStatus.FAILED, message = decision.message)
             }
         }
+    }
+
+    /**
+     * Theo yêu cầu GVHD: chỉ dùng LstTimes.
+     * - Người đăng ký tại máy → không kiểm tra lịch.
+     * - Người từ server mà LstTimes rỗng → TỪ CHỐI (an toàn, chờ GVHD xác nhận).
+     */
+    private fun scheduleOf(user: RegisteredUser): AccessSchedule? {
+        val days = user.lstTimes ?: return null
+        return if (days.isEmpty()) AccessSchedule.NEVER else AccessSchedule(lstTimes = days)
+    }
+
+    /** [GĐ3] Áp dụng push_biometric. null = thành công (DeviceAgent sẽ ACK), khác null = lý do lỗi. */
+    private suspend fun applyBiometric(bio: PushBiometric): String? = withContext(Dispatchers.Default) {
+        val id = RegisteredUser.serverId(bio.bioId)
+        val error: String? = when (bio.cmdType) {
+            "DELETE_BIO" -> {
+                recognizer.removeFace(id) // xoá người không tồn tại vẫn coi là xong
+                null
+            }
+            "NEW_BIO" -> {
+                val img = bio.faceImg
+                if (img == null) {
+                    "Thiếu FaceImg"
+                } else {
+                    when (val r = enroller.extract(img)) {
+                        is FaceImageEnroller.Result.Fail -> r.reason
+                        is FaceImageEnroller.Result.Ok -> {
+                            recognizer.upsertUser(
+                                RegisteredUser(
+                                    id = id,
+                                    name = bio.fullName ?: "BioId ${bio.bioId}",
+                                    embedding = r.embedding,
+                                    bioId = bio.bioId,
+                                    idNumber = bio.idNumber,
+                                    lstTimes = bio.schedule.lstTimes
+                                )
+                            )
+                            null
+                        }
+                    }
+                }
+            }
+            else -> "CmdType lạ: ${bio.cmdType}"
+        }
+        val users = recognizer.getRegisteredUsers()
+        withContext(Dispatchers.Main) { registeredUsers = users }
+        error
     }
 
     // ---------------- [GĐ3] Cấu hình thiết bị ----------------

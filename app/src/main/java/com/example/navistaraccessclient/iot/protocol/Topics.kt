@@ -22,6 +22,7 @@ object Topics {
     const val QOS_DOOR_STATUS = 1
     const val QOS_COMMAND_RESP = 2
     const val QOS_SETTING_CHANGED = 1
+    const val QOS_DEVICE_RECEIVED_BIO = 2
     const val QOS_SUBSCRIBE = 2
 
     /** 1 filter duy nhất để nhận mọi bản tin của server cho thiết bị này */

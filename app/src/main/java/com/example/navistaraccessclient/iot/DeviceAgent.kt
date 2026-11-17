@@ -15,6 +15,7 @@ import com.example.navistaraccessclient.iot.protocol.PushBiometric
 import com.example.navistaraccessclient.iot.protocol.PushConfig
 import com.example.navistaraccessclient.iot.protocol.ServerCommand
 import com.example.navistaraccessclient.iot.protocol.Topics
+import com.example.navistaraccessclient.iot.protocol.DeviceReceivedBioMsg
 import com.example.navistaraccessclient.model.AuthStatus
 import com.example.navistaraccessclient.model.FaceAuthResult
 import kotlinx.coroutines.CoroutineScope
@@ -36,11 +37,11 @@ data class AccessDecision(val granted: Boolean, val message: String?, val sentOn
  * "Bộ não" phía IoT: nối kết nối MQTT, trạng thái thiết bị, cửa và luồng nhận diện.
  *
  * Phạm vi bản này (làm được khi CHƯA có SDK khuôn mặt của Lab):
- *  ✅ healthcheck mỗi 30 s
- *  ✅ push_config: áp dụng các trường có mặt, lưu lại
- *  ✅ command: 5 lệnh + command_resp, bỏ lệnh quá hạn, chống xử lý trùng CmdId
- *  ✅ doorstatus khi cửa (mô phỏng) đổi trạng thái
- *  ✅ access cho mỗi lượt quẹt mặt, lưu offline + gửi lại IsResend
+ *  healthcheck mỗi 30 s
+ *  push_config: áp dụng các trường có mặt, lưu lại
+ *  command: 5 lệnh + command_resp, bỏ lệnh quá hạn, chống xử lý trùng CmdId
+ *  doorstatus khi cửa (mô phỏng) đổi trạng thái
+ *  access cho mỗi lượt quẹt mặt, lưu offline + gửi lại IsResend
  *  ⏸ push_biometric / device_sync_bio / device_received_bio: CHỜ SDK (chỉ đọc + ghi log, KHÔNG ack,
  *     vì ack nghĩa là báo server "đã lưu xong" trong khi app chưa lưu được template)
  *  ⏸ push_required_door / notify_access_depend / update_apk / setting_changed: chờ chốt phạm vi
@@ -71,6 +72,12 @@ class DeviceAgent(private val context: Context, private val scope: CoroutineScop
     val lastEvent: StateFlow<String?> = _lastEvent.asStateFlow()
 
     private val recentCmdIds = ArrayDeque<Long>()
+
+    /**
+     * Áp dụng 1 bản tin push_biometric. ViewModel gán hàm này vì ViewModel giữ bộ nhận diện.
+     * Trả về null = thành công (sẽ ACK); khác null = lý do thất bại (KHÔNG ACK).
+     */
+    var biometricHandler: (suspend (PushBiometric) -> String?)? = null
 
     private val connection = MqttV5Connection(
         scope = scope,
@@ -139,21 +146,14 @@ class DeviceAgent(private val context: Context, private val scope: CoroutineScop
 
     // ------------------------------------------------------------------ Bản tin từ server
 
-    private fun handleServerMessage(topic: String, payload: String) {
+    private suspend fun handleServerMessage(topic: String, payload: String) {
         val type = Topics.parseServerTopic(topic, mac)
         if (type == null) { Log.w(TAG, "Topic lạ: $topic"); return }
         try {
             when (type) {
                 Topics.ServerType.PUSH_CONFIG -> applyPushConfig(PushConfig.parse(payload))
                 Topics.ServerType.COMMAND -> handleCommand(ServerCommand.parse(payload))
-                Topics.ServerType.PUSH_BIOMETRIC -> {
-                    val bio = PushBiometric.parse(payload)
-                    // Lưu DoorId ngay (tài liệu: "the door this device controls; store it")
-                    if (bio.doorId != null && bio.doorId != _state.value.doorId) {
-                        setState(_state.value.copy(doorId = bio.doorId))
-                    }
-                    event("Nhận push_biometric ${bio.cmdType} BioId=${bio.bioId} (${bio.fullName}) — CHƯA áp dụng, chờ SDK Lab")
-                }
+                Topics.ServerType.PUSH_BIOMETRIC -> handlePushBiometric(PushBiometric.parse(payload))
                 Topics.ServerType.PUSH_REQUIRED_DOOR,
                 Topics.ServerType.NOTIFY_ACCESS_DEPEND,
                 Topics.ServerType.UPDATE_APK -> event("Nhận ${type.wire} — chưa hỗ trợ: $payload")
@@ -162,6 +162,22 @@ class DeviceAgent(private val context: Context, private val scope: CoroutineScop
             Log.e(TAG, "Bản tin ${type.wire} sai định dạng: $payload", e)
             event("Bản tin ${type.wire} sai định dạng")
         }
+    }
+
+    private suspend fun handlePushBiometric(bio: PushBiometric) {
+        if (bio.doorId != null && bio.doorId != _state.value.doorId) {
+            setState(_state.value.copy(doorId = bio.doorId))
+        }
+        val handler = biometricHandler
+        val error = if (handler == null) "App chưa sẵn sàng" else handler(bio)
+        if (error != null) {
+            // KHÔNG ACK → server coi như chưa giao tới thiết bị (an toàn hơn ACK sai)
+            event("push_biometric ${bio.cmdType} BioId=${bio.bioId} LỖI: $error → không ACK")
+            return
+        }
+        val ack = DeviceReceivedBioMsg(mac, bio.bioId, bio.doorId ?: _state.value.doorId, bio.cmdType, IotTime.isoUtc())
+        val sent = connection.publish(Topics.DEVICE_RECEIVED_BIO, ack.toJson(), Topics.QOS_DEVICE_RECEIVED_BIO)
+        event("push_biometric ${bio.cmdType} BioId=${bio.bioId} ${bio.fullName ?: ""} → đã lưu, ACK ${if (sent) "đã gửi" else "LỖI (offline)"}")
     }
 
     private fun applyPushConfig(cfg: PushConfig) {
