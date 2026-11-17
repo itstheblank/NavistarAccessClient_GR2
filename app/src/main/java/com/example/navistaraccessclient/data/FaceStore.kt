@@ -7,6 +7,7 @@ import com.example.navistaraccessclient.model.RegisteredUser
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import com.example.navistaraccessclient.iot.protocol.LstTimesJson
 
 /**
  * Lưu danh sách người đã đăng ký (tên + vector 192 chiều) xuống bộ nhớ trong của app.
@@ -36,7 +37,10 @@ class FaceStore(context: Context, fileName: String = "registered_faces.json") {
                 RegisteredUser(
                     id = o.getString("id"),
                     name = o.getString("name"),
-                    embedding = FloatArray(emb.length()) { j -> emb.getDouble(j).toFloat() }
+                    embedding = FloatArray(emb.length()) { j -> emb.getDouble(j).toFloat() },
+                    bioId = if (o.has("bioId")) o.getLong("bioId") else null,
+                    idNumber = if (o.has("idNumber")) o.getString("idNumber") else null,
+                    lstTimes = if (o.has("lstTimes")) LstTimesJson.parse(o.getJSONArray("lstTimes")) else null
                 )
             }
         } catch (e: Exception) {
@@ -52,6 +56,9 @@ class FaceStore(context: Context, fileName: String = "registered_faces.json") {
                 put("id", u.id)
                 put("name", u.name)
                 put("embedding", JSONArray().apply { u.embedding.forEach { put(it.toDouble()) } })
+                u.bioId?.let { put("bioId", it) }
+                u.idNumber?.let { put("idNumber", it) }
+                u.lstTimes?.let { put("lstTimes", LstTimesJson.toJson(it)) }
             })
         }
         val out = file.startWrite()

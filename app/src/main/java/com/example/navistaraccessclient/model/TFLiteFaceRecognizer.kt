@@ -161,6 +161,11 @@ class TFLiteFaceRecognizer(
         return removed
     }
 
+    override fun upsertUser(user: RegisteredUser) {
+        registeredUsers[user.id] = user
+        persist()
+    }
+
     override fun close() {
         synchronized(lock) {
             interpreter?.close()

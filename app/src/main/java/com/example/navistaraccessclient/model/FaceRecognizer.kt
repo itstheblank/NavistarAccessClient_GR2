@@ -19,6 +19,8 @@ interface FaceRecognizer {
     /** Xoá 1 người đã đăng ký. Trả true nếu có xoá. */
     fun removeFace(id: String): Boolean
 
+    fun upsertUser(user: RegisteredUser)
+
     fun getRegisteredUsers(): List<RegisteredUser>
 
     fun setThreshold(threshold: Float)

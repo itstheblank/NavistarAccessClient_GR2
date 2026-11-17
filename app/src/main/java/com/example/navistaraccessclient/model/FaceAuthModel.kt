@@ -2,6 +2,7 @@ package com.example.navistaraccessclient.model
 
 import android.graphics.Bitmap
 import android.graphics.Rect
+import com.example.navistaraccessclient.iot.protocol.DaySchedule
 
 /**
  * Face Authentication status
@@ -31,5 +32,12 @@ data class FaceAuthResult(
 data class RegisteredUser(
     val id: String,
     val name: String,
-    val embedding: FloatArray
-)
+    val embedding: FloatArray,
+    val bioId: Long? = null,
+    val idNumber: String? = null,
+    val lstTimes: List<DaySchedule>? = null
+) {
+    companion object {
+        fun serverId(bioId: Long) = "BIO_$bioId"
+    }
+}
