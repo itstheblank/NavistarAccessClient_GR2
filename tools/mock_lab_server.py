@@ -24,7 +24,7 @@ import json
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import paho.mqtt.client as mqtt
@@ -116,15 +116,25 @@ def send_command(client, mac, cmd_type, cmd_id=None, offset_sec=0, timeout=30):
     return cmd_id
 
 
-def push_biometric_sample(client, mac):
-    msg = {"CmdType": "NEW_BIO", "BioId": 1005, "DoorId": 12, "IdNumber": "001099012345",
-           "FullName": "Nguyen Van A", "FromDate": "2026-10-22", "ToDate": "2026-12-31",
-           "FromTime": "08:00:00", "ToTime": "17:30:00", "ActiveDays": "", "LstTimes": [],
-           "FaceTemps": ["<template SDK Lab>"], "IrFaceTemps": [], "FingerTemps": [], "IrisTemps": [],
-           "IsNoTemplate": False, "FaceImg": "", "FingerImg": "", "IrisImg": "",
+def push_biometric(client, mac, image_path, bio_id=1005, name="Nguyen Van A", with_times=True):
+    with open(image_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
+    today_vn = datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d")
+    lst_times = [{"Day": today_vn, "Time": [{"Start": "00:00:00", "End": "23:59:59"}]}] if with_times else []
+    msg = {"CmdType": "NEW_BIO", "BioId": bio_id, "DoorId": 12, "IdNumber": f"0010990{bio_id}",
+           "FullName": name, "FromDate": "", "ToDate": "", "FromTime": "", "ToTime": "", "ActiveDays": "",
+           "LstTimes": lst_times, "FaceTemps": [], "IrFaceTemps": [], "FingerTemps": [], "IrisTemps": [],
+           "IsNoTemplate": True, "FaceImg": img_b64, "FingerImg": "", "IrisImg": "",
            "SyncEnded": True, "IsCheckIn": False}
     client.publish(f"iot/server/push_biometric/{mac}", json.dumps(msg), qos=2)
-    print("[SERVER] → push_biometric mẫu (BioId 1005, DoorId 12). App hiện chỉ đọc + lưu DoorId, CHƯA ack.")
+    print(f"[SERVER] → push_biometric NEW_BIO BioId={bio_id} '{name}' ảnh={image_path} "
+          f"({len(img_b64) // 1024} KB) LstTimes={'hôm nay cả ngày' if with_times else 'RỖNG'}")
+
+
+def delete_biometric(client, mac, bio_id):
+    msg = {"CmdType": "DELETE_BIO", "BioId": bio_id, "DoorId": 12, "SyncEnded": True}
+    client.publish(f"iot/server/push_biometric/{mac}", json.dumps(msg), qos=2)
+    print(f"[SERVER] → push_biometric DELETE_BIO BioId={bio_id}")
 
 
 def on_connect(client, userdata, flags, reason_code, properties=None):
@@ -178,7 +188,9 @@ Lệnh:  open | emergency | close | disable | enable      → gửi command
        expired     → gửi REMOTE_OPEN đã quá hạn (app phải bỏ qua nhưng VẪN trả command_resp)
        dup         → gửi lại CmdId vừa dùng (app không được thực hiện 2 lần)
        config [threshold] [hold_ms] [IN|OUT]  → gửi push_config (VD: config 0.75 5000 OUT)
-       bio         → gửi push_biometric mẫu
+       bio <ảnh.jpg> [BioId] [Tên]  → gửi NEW_BIO kèm FaceImg, LstTimes = hôm nay cả ngày
+       bionotime <ảnh.jpg> [BioId]  → như trên nhưng LstTimes RỖNG (app phải trả NO_SCHEDULE)
+       delbio <BioId>               → gửi DELETE_BIO
        macs | use <MAC>  → xem / chọn thiết bị
        pending     → các lệnh chưa được trả command_resp
        help | quit
@@ -227,8 +239,17 @@ def console(client):
             hold = int(parts[2]) if len(parts) > 2 else 3000
             d = parts[3].upper() if len(parts) > 3 else "IN"
             push_config(client, mac, th, hold, d)
-        elif cmd == "bio":
-            push_biometric_sample(client, mac)
+        elif cmd in ("bio", "bionotime"):
+            if len(parts) < 2:
+                print("Cú pháp: bio <đường_dẫn_ảnh> [BioId] [Tên]"); continue
+            bio_id = int(parts[2]) if len(parts) > 2 else 1005
+            name = " ".join(parts[3:]) if len(parts) > 3 else "Nguyen Van A"
+            try:
+                push_biometric(client, mac, parts[1], bio_id, name, with_times=(cmd == "bio"))
+            except OSError as e:
+                print("Không mở được ảnh:", e)
+        elif cmd == "delbio" and len(parts) > 1:
+            delete_biometric(client, mac, int(parts[1]))
         else:
             print("Không hiểu lệnh. Gõ help.")
 
