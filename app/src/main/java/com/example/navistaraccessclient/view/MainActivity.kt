@@ -120,20 +120,30 @@ fun AccessControlScreen(
                     .padding(16.dp)
             )
 
-            // [GĐ3] Sự kiện IoT gần nhất — chỉ hiện khi bật khung debug (màn hình kiosk vẫn gọn)
+            // [GĐ3] Sự kiện IoT gần nhất + kết quả push_biometric gần nhất — chỉ hiện khi bật khung debug
             if (viewModel.showDebugBox) {
-                viewModel.lastIotEvent?.let { ev ->
-                    Text(
-                        text = ev,
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .statusBarsPadding()
-                            .padding(top = 64.dp, start = 16.dp, end = 16.dp)
-                            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
+                val lines = listOfNotNull(
+                    viewModel.lastIotEvent,
+                    viewModel.lastBioEvent?.takeIf { it != viewModel.lastIotEvent }
+                )
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .statusBarsPadding()
+                        .padding(top = 64.dp, start = 16.dp, end = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    lines.forEach { ev ->
+                        Text(
+                            text = ev,
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            modifier = Modifier
+                                .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
+                                .padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
                 }
             }
 

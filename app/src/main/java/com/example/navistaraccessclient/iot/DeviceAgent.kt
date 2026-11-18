@@ -71,6 +71,10 @@ class DeviceAgent(private val context: Context, private val scope: CoroutineScop
     private val _lastEvent = MutableStateFlow<String?>(null)
     val lastEvent: StateFlow<String?> = _lastEvent.asStateFlow()
 
+    /** Kết quả push_biometric gần nhất — tách riêng để không bị dòng access ghi đè */
+    private val _lastBioEvent = MutableStateFlow<String?>(null)
+    val lastBioEvent: StateFlow<String?> = _lastBioEvent.asStateFlow()
+
     private val recentCmdIds = ArrayDeque<Long>()
 
     /**
@@ -172,12 +176,12 @@ class DeviceAgent(private val context: Context, private val scope: CoroutineScop
         val error = if (handler == null) "App chưa sẵn sàng" else handler(bio)
         if (error != null) {
             // KHÔNG ACK → server coi như chưa giao tới thiết bị (an toàn hơn ACK sai)
-            event("push_biometric ${bio.cmdType} BioId=${bio.bioId} LỖI: $error → không ACK")
+            bioEvent("push_biometric ${bio.cmdType} BioId=${bio.bioId} LỖI: $error → không ACK")
             return
         }
         val ack = DeviceReceivedBioMsg(mac, bio.bioId, bio.doorId ?: _state.value.doorId, bio.cmdType, IotTime.isoUtc())
         val sent = connection.publish(Topics.DEVICE_RECEIVED_BIO, ack.toJson(), Topics.QOS_DEVICE_RECEIVED_BIO)
-        event("push_biometric ${bio.cmdType} BioId=${bio.bioId} ${bio.fullName ?: ""} → đã lưu, ACK ${if (sent) "đã gửi" else "LỖI (offline)"}")
+        bioEvent("push_biometric ${bio.cmdType} BioId=${bio.bioId} ${bio.fullName ?: ""} → đã lưu, ACK ${if (sent) "đã gửi" else "LỖI (offline)"}")
     }
 
     private fun applyPushConfig(cfg: PushConfig) {
@@ -292,6 +296,11 @@ class DeviceAgent(private val context: Context, private val scope: CoroutineScop
     private fun event(text: String) {
         Log.i(TAG, text)
         _lastEvent.value = text
+    }
+
+    private fun bioEvent(text: String) {
+        event(text)
+        _lastBioEvent.value = text
     }
 
     fun shutdown() {

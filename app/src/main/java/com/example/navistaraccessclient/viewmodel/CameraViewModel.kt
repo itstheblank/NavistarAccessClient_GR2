@@ -67,6 +67,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     var lastIotEvent by mutableStateOf<String?>(null)
         private set
 
+    /** Kết quả push_biometric gần nhất (hiện khi bật chế độ debug) */
+    var lastBioEvent by mutableStateOf<String?>(null)
+        private set
+
     // Chỉ Overlay đọc state này (trong pha draw) → không recompose cả màn hình mỗi frame
     var faceFrame by mutableStateOf(FaceFrame())
         private set
@@ -123,6 +127,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch { deviceAgent.config.collect { deviceConfig = it } }
         viewModelScope.launch { deviceAgent.door.state.collect { doorStatus = it } }
         viewModelScope.launch { deviceAgent.lastEvent.collect { lastIotEvent = it } }
+        viewModelScope.launch { deviceAgent.lastBioEvent.collect { lastBioEvent = it } }
         viewModelScope.launch {
             deviceAgent.state.collect { s ->
                 deviceState = s
