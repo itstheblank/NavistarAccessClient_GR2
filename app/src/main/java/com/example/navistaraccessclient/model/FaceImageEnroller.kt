@@ -4,6 +4,8 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.util.Base64
 import android.util.Log
 import com.example.navistaraccessclient.utils.BitmapUtils
@@ -13,12 +15,16 @@ import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
+import java.io.ByteArrayInputStream
 import java.util.concurrent.TimeUnit
 
 /**
  * Lấy vector khuôn mặt từ ảnh FaceImg (base64) mà server gửi trong push_biometric.
  * Dùng CÙNG pipeline với camera (ML Kit → crop +15% → 112x112 → MobileFaceNet)
  * để vector đăng ký so sánh được với vector lúc quẹt mặt.
+ *
+ * Ảnh chụp từ điện thoại thường có cờ xoay EXIF mà BitmapFactory KHÔNG tự áp dụng
+ * → xoay theo EXIF trước, nếu vẫn không thấy mặt thì thử lần lượt các góc 90/270/180.
  *
  * Hàm CHẶN luồng (ML Kit + TFLite) → chỉ gọi trên Dispatchers.Default.
  */
@@ -28,25 +34,51 @@ class FaceImageEnroller(private val recognizer: FaceRecognizer) {
         class Fail(val reason: String) : Result()
     }
 
-    fun extract(base64Image: String): Result{
+    fun extract(base64Image: String): Result {
+        val raw = base64Image.trim()
+        // Bỏ tiền tố "data:image/jpeg;base64," nếu có
+        val b64 = if (raw.startsWith("data:")) raw.substringAfter(',') else raw
         val bytes = try {
-            Base64.decode(base64Image.substringAfter("base64"), Base64.DEFAULT)
+            Base64.decode(b64, Base64.DEFAULT)
         } catch (e: IllegalArgumentException) {
             return Result.Fail("FaceImg không phải base64 hợp lệ")
         }
-        val bitmap = decodeScaled(bytes) ?: return Result.Fail("Không giải mã được ảnh")
+        val decoded = decodeScaled(bytes) ?: return Result.Fail("Không giải mã được ảnh")
+
+        val exifDeg = readExifRotation(bytes)
+        val bitmap = if (exifDeg != 0) rotate(decoded, exifDeg).also { decoded.recycle() } else decoded
+        Log.i(TAG, "FaceImg ${bytes.size / 1024} KB → ${bitmap.width}x${bitmap.height}, EXIF xoay $exifDeg°")
 
         val detector = FaceDetection.getClient(OPTIONS)
+        try {
+            for (deg in TRY_ROTATIONS) {
+                val r = tryAt(detector, bitmap, deg)
+                if (r != null) return r
+            }
+            return Result.Fail("Không tìm thấy khuôn mặt trong ảnh (đã thử xoay 0/90/270/180°)")
+        } catch (e: Exception) {
+            Log.e(TAG, "Xử lý FaceImg lỗi", e)
+            return Result.Fail("Lỗi xử lý ảnh: ${e.javaClass.simpleName}")
+        } finally {
+            detector.close()
+            bitmap.recycle()
+        }
+    }
+
+    /** Thử dò mặt ở 1 góc xoay (kèm 1 lần thêm viền). null = không thấy mặt ở góc này. */
+    private fun tryAt(detector: FaceDetector, base: Bitmap, deg: Int): Result? {
+        val rotated = if (deg == 0) base else rotate(base, deg)
         var padded: Bitmap? = null
         try {
-            var source = bitmap
-            var faces = detect(detector, bitmap)
+            var source = rotated
+            var faces = detect(detector, rotated)
             if (faces.isEmpty()) {
-                padded = withMargin(bitmap)
+                padded = withMargin(rotated)
                 source = padded
                 faces = detect(detector, padded)
             }
-            if (faces.isEmpty()) return Result.Fail("Không tìm thấy khuôn mặt trong ảnh")
+            Log.i(TAG, "Xoay thêm $deg°: ${faces.size} mặt")
+            if (faces.isEmpty()) return null
             if (faces.size > 1) return Result.Fail("Ảnh có ${faces.size} khuôn mặt")
 
             val crop = BitmapUtils.cropFace(source, faces[0].boundingBox)
@@ -56,17 +88,31 @@ class FaceImageEnroller(private val recognizer: FaceRecognizer) {
             } finally {
                 if (crop !== source) crop.recycle()
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Xử lý FaceImg lỗi", e)
-            return Result.Fail("Lỗi xử lý ảnh: ${e.javaClass.simpleName}")
         } finally {
-            detector.close()
             padded?.recycle()
-            bitmap.recycle()
+            if (rotated !== base) rotated.recycle()
         }
     }
 
-    private fun detect(detector: FaceDetector, bmp: Bitmap): List<Face> = Tasks.await(detector.process(InputImage.fromBitmap(bmp, 0)), 10, TimeUnit.SECONDS)
+    private fun detect(detector: FaceDetector, bmp: Bitmap): List<Face> =
+        Tasks.await(detector.process(InputImage.fromBitmap(bmp, 0)), 10, TimeUnit.SECONDS)
+
+    private fun readExifRotation(bytes: ByteArray): Int = try {
+        when (ExifInterface(ByteArrayInputStream(bytes))
+            .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
+    } catch (e: Exception) {
+        0 // PNG / ảnh không có EXIF
+    }
+
+    private fun rotate(src: Bitmap, deg: Int): Bitmap {
+        val m = Matrix().apply { postRotate(deg.toFloat()) }
+        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, m, true)
+    }
 
     private fun decodeScaled(bytes: ByteArray): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -75,6 +121,7 @@ class FaceImageEnroller(private val recognizer: FaceRecognizer) {
         var sample = 1
         while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MAX_SIDE) sample *= 2
         val opts = BitmapFactory.Options().apply {
+            inSampleSize = sample
             inSampleSize = sample
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
@@ -93,6 +140,8 @@ class FaceImageEnroller(private val recognizer: FaceRecognizer) {
     private companion object {
         const val TAG = "FaceImageEnroller"
         const val MAX_SIDE = 800
+        /** Góc xoay THÊM sau EXIF: 0 trước (ảnh đúng chiều), rồi 90/270 (ảnh dọc/ngang), cuối cùng 180 */
+        val TRY_ROTATIONS = intArrayOf(0, 90, 270, 180)
         val OPTIONS: FaceDetectorOptions = FaceDetectorOptions.Builder()
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE) // ảnh tĩnh → ưu tiên chính xác
             .setMinFaceSize(0.1f)
