@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Rect
 import android.media.ExifInterface
 import android.util.Base64
 import android.util.Log
@@ -77,11 +78,15 @@ class FaceImageEnroller(private val recognizer: FaceRecognizer) {
                 source = padded
                 faces = detect(detector, padded)
             }
-            Log.i(TAG, "Xoay thêm $deg°: ${faces.size} mặt")
+            Log.i(TAG, "Xoay thêm $deg°: ${faces.size} mặt trên ảnh ${source.width}x${source.height}")
+            faces.forEach { Log.i(TAG, "  mặt ${it.boundingBox.toShortString()}") }
             if (faces.isEmpty()) return null
-            if (faces.size > 1) return Result.Fail("Ảnh có ${faces.size} khuôn mặt")
 
-            val crop = BitmapUtils.cropFace(source, faces[0].boundingBox)
+            val main = mainFaces(faces)
+            if (main.size < faces.size) Log.i(TAG, "Bỏ ${faces.size - main.size} mặt trùng/quá nhỏ (coi là nhận nhầm)")
+            if (main.size > 1) return Result.Fail("Ảnh có ${main.size} khuôn mặt")
+
+            val crop = BitmapUtils.cropFace(source, main[0].boundingBox)
                 ?: return Result.Fail("Cắt ảnh khuôn mặt lỗi")
             return try {
                 Result.Ok(recognizer.extractEmbedding(crop))
@@ -92,6 +97,34 @@ class FaceImageEnroller(private val recognizer: FaceRecognizer) {
             padded?.recycle()
             if (rotated !== base) rotated.recycle()
         }
+    }
+
+    /**
+     * Chỉ giữ các mặt "thật" trước khi áp luật ≥ 2 mặt:
+     *  - Bỏ khung TRÙNG: ML Kit đôi khi trả 2 khung chồng lên nhau cho cùng 1 mặt chụp sát
+     *    (≥ [DUPLICATE_OVERLAP] diện tích khung nhỏ nằm trong khung lớn hơn) → giữ khung lớn.
+     *  - Bỏ khung QUÁ NHỎ (< [MIN_RELATIVE_SIZE] lần mặt lớn nhất): phản chiếu trên kính, hoa văn nền.
+     * Ảnh 2 người thật: 2 mặt nằm cạnh nhau, cỡ tương đương → vẫn bị từ chối.
+     */
+    private fun mainFaces(faces: List<Face>): List<Face> {
+        val sorted = faces.sortedByDescending { area(it.boundingBox) }
+        val maxW = sorted[0].boundingBox.width()
+        val kept = mutableListOf<Face>()
+        for (f in sorted) {
+            if (f.boundingBox.width() < maxW * MIN_RELATIVE_SIZE) continue
+            if (kept.any { overlapOfSmaller(it.boundingBox, f.boundingBox) >= DUPLICATE_OVERLAP }) continue
+            kept += f
+        }
+        return kept
+    }
+
+    private fun area(r: Rect): Long = r.width().toLong() * r.height()
+
+    /** Tỉ lệ diện tích giao nhau so với khung NHỎ hơn (0..1) */
+    private fun overlapOfSmaller(a: Rect, b: Rect): Float {
+        val inter = Rect()
+        if (!inter.setIntersect(a, b)) return 0f
+        return area(inter).toFloat() / minOf(area(a), area(b))
     }
 
     private fun detect(detector: FaceDetector, bmp: Bitmap): List<Face> =
@@ -146,5 +179,9 @@ class FaceImageEnroller(private val recognizer: FaceRecognizer) {
             .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE) // ảnh tĩnh → ưu tiên chính xác
             .setMinFaceSize(0.1f)
             .build()
+        /** Mặt phụ có chiều rộng < 40% mặt lớn nhất → bỏ qua */
+        const val MIN_RELATIVE_SIZE = 0.4f
+        /** ≥ 60% diện tích khung nhỏ nằm trong khung lớn → coi là cùng 1 mặt */
+        const val DUPLICATE_OVERLAP = 0.6f
     }
 }
